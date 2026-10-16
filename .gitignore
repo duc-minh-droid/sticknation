@@ -1,0 +1,6 @@
+node_modules/
+dist/
+# trained brains are local to each player
+brains/
+.claude/
+*.tmp

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stick Nation</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="top">
+      <h1 class="title">Stick Nation</h1>
+      <div id="controls"></div>
+    </header>
+    <main id="main">
+      <section id="left">
+        <div id="stage">
+          <canvas id="c"></canvas>
+          <div id="hint"></div>
+        </div>
+        <div id="palette" aria-label="Arena items: drag into the arena">
+          <div id="trash">drop here to remove</div>
+        </div>
+      </section>
+      <aside id="panel">
+        <div class="note" id="workshop">
+          <div class="tape"></div>
+          <h2>Weapon workshop</h2>
+          <p class="sub">Draw a weapon. Start where he holds it.</p>
+          <canvas id="pad" width="300" height="150"></canvas>
+          <div class="pad-stats" id="padStats">empty</div>
+          <div class="row-btns">
+            <button id="giveBtn" class="sketch primary" disabled>Give it to Blue</button>
+            <button id="eraseBtn" class="sketch">Erase</button>
+            <button id="dropBtn" class="sketch" hidden>Take it away</button>
+          </div>
+        </div>
+        <div id="hud"></div>
+      </aside>
+    </main>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
