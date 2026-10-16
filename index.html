@@ -17,6 +17,11 @@
         <div id="stage">
           <canvas id="c"></canvas>
           <div id="hint"></div>
+          <div id="zoom">
+            <button class="sketch" id="zoomIn" title="Zoom in (or scroll)">+</button>
+            <button class="sketch" id="zoomOut" title="Zoom out">−</button>
+            <button class="sketch" id="zoomFit" title="Show the whole arena">fit</button>
+          </div>
         </div>
         <div id="palette" aria-label="Arena items: drag into the arena">
           <div id="trash">drop here to remove</div>
@@ -25,14 +30,32 @@
       <aside id="panel">
         <div class="note" id="workshop">
           <div class="tape"></div>
-          <h2>Weapon workshop</h2>
-          <p class="sub">Draw a weapon. Start where he holds it.</p>
-          <canvas id="pad" width="300" height="150"></canvas>
-          <div class="pad-stats" id="padStats">empty</div>
-          <div class="row-btns">
-            <button id="giveBtn" class="sketch primary" disabled>Give it to Blue</button>
-            <button id="eraseBtn" class="sketch">Erase</button>
-            <button id="dropBtn" class="sketch" hidden>Take it away</button>
+          <h2>Abilities</h2>
+          <div class="abilities">
+            <button class="abil" data-ability="base">
+              <svg viewBox="0 0 40 40" width="36" height="36" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 33 L31 8"/><path d="M10 31.5 L30.6 9.4" opacity=".45"/><path d="M27 6c2 1 4 3 5 5" opacity=".7"/></svg>
+              <b>Base</b><small>stick · swing · heavy swing</small>
+            </button>
+            <button class="abil" data-ability="tk">
+              <svg viewBox="0 0 40 40" width="36" height="36" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M8 32c2-6 6-9 10-10"/><path d="M19 20c1-1 2-1 3 0" /><path d="M24 16c3-3 6-4 9-4" stroke-dasharray="2 3"/><rect x="25" y="5" width="9" height="8" rx="2" transform="rotate(12 29 9)"/><path d="M33 17l2 2M30 19l1 3M36 13l3 0" opacity=".7"/></svg>
+              <b>Telekinesis</b><small>moves your drawing · shield · slam</small>
+            </button>
+          </div>
+          <div id="baseBox">
+            <p class="ability"><b>Stick</b> · <b>Swing</b> (quick) · <b>Heavy swing</b> (slow windup, <b>breaks blocks</b>)</p>
+            <p class="sub">He learns when each move pays off. Draw your own weapon to replace the stick (start where he holds it).</p>
+            <canvas id="pad" width="300" height="150"></canvas>
+            <div class="pad-stats" id="padStats">empty</div>
+            <div class="row-btns">
+              <button id="giveBtn" class="sketch primary" disabled>Give it to Blue</button>
+              <button id="eraseBtn" class="sketch">Erase</button>
+              <button id="dropBtn" class="sketch" hidden>Back to the stick</button>
+            </div>
+          </div>
+          <div id="tkBox" hidden>
+            <p class="ability"><b>No stick.</b> He grabs one of <b>your drawings</b> and steers it: <b>shield</b> things coming at him, or <b>slam</b> it into enemies from range.</p>
+            <p class="sub">He takes the newest drawing he can reach (not ones you're throwing at him). Draw a new one and he'll swap to it. Held drawings don't get erased.</p>
+            <p class="pad-stats" id="tkStatus">Not holding anything: draw something near him.</p>
           </div>
         </div>
         <div id="hud"></div>

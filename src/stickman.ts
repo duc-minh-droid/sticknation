@@ -66,12 +66,19 @@ export type Tip = 'hand0' | 'hand1' | 'foot0' | 'foot1' | 'weapon';
  * along the forearm past the hand, y is sideways. Physics treats it as a straight
  * extension of the forearm (collision samples beyond the hand); the drawing is cosmetic.
  */
-export interface Weapon { strokes: Vec[][]; length: number; mass: number }
+export interface Weapon { strokes: Vec[][]; length: number; mass: number; name?: string }
+
+/**
+ * The "Base" ability: a plain stick. Every move set builds on it: swing (quick) and
+ * heavy swing (slow windup, breaks blocks). A drawn weapon replaces the stick.
+ */
+export const BASE_STICK: Weapon = { name: 'stick', strokes: [[{ x: -4, y: 1 }, { x: 22, y: 0 }, { x: 56, y: -3 }]], length: 56, mass: 1.5 };
+export const isBaseStick = (w: Weapon | null) => !!w && w.name === 'stick';
 
 /** Collision points every ~11 units along the weapon, so nothing slips between them. */
-function weaponSamples(length: number): Sample[] {
+function weaponSamples(length: number, fore: number): Sample[] {
   const n = Math.max(3, Math.ceil(length / 11));
-  return Array.from({ length: n }, (_, i): Sample => ({ a: EL1, b: HA1, t: 1 + (length * (i + 1)) / n / DIM.fore, r: 6, part: 'weapon', tip: 'weapon' }));
+  return Array.from({ length: n }, (_, i): Sample => ({ a: EL1, b: HA1, t: 1 + (length * (i + 1)) / n / fore, r: 6, part: 'weapon', tip: 'weapon' }));
 }
 /** Collision sample on a bone: point lerp(a, b, t) with radius r. */
 export interface Sample { a: number; b: number; t: number; r: number; part: Part; tip?: Tip }
@@ -97,6 +104,25 @@ export const SAMPLES: Sample[] = [
 ];
 
 export type Mode = 'stand' | 'air' | 'down' | 'rise';
+/**
+ * Body stats as multipliers (1 = baseline). Earned through play, see ai.ts.
+ *  swing:   weapon swings play out faster and the arm snaps harder
+ *  power:   punch/kick/swing damage and knockback
+ *  reflex:  every action (duck, block, dodge, strikes) starts and finishes sooner
+ *  agility: walk/run speed, jump height, dodge distance
+ *  tough:   damage taken is divided by this
+ *  balance: harder to knock over, shorter knockdowns, quicker get-up
+ */
+/**
+ * Telekinesis: one drawing held and steered toward target. hover = floats beside him,
+ * shield = parked in the path of something incoming, slam = flung at an enemy.
+ */
+export interface Telekinesis { bodyId: number; mode: 'hover' | 'shield' | 'slam'; target: Vec; until: number }
+
+export interface Attributes { swing: number; power: number; reflex: number; agility: number; tough: number; balance: number }
+export const STAT_NAMES: (keyof Attributes)[] = ['swing', 'power', 'reflex', 'agility', 'tough', 'balance'];
+export const baseAttributes = (): Attributes => ({ swing: 1, power: 1, reflex: 1, agility: 1, tough: 1, balance: 1 });
+
 export type ActionKind = 'none' | 'punch' | 'kick' | 'duck' | 'block' | 'jump' | 'dodge' | 'swing';
 
 export interface Action { kind: ActionKind; t: number; dur: number; limb: number; target: Vec; dir: number; hit: boolean }
@@ -141,12 +167,22 @@ export class Stickman {
   private moved = { x: 0, y: 0 };
   private holdX: number | null = null;
   weapon: Weapon | null = null;
+  attrs: Attributes = baseAttributes();
+  tk: Telekinesis | null = null;
   /** Height of the surface under (x, y): the floor, or terrain. Set by the world. */
   ground: (x: number, y: number) => number = () => GROUND;
   /** strikes stopped by this stickman's weapon (read by the brain to score parries) */
   parries = 0;
   /** Collision samples: the body's, plus the weapon's when armed. */
   samples: Sample[] = SAMPLES;
+  /** Body scale (1 = normal). He grows a little as his stats climb. */
+  size = 1;
+  /** where size is easing toward */
+  targetSize = 1;
+  /** this stickman's bone lengths at his current size */
+  dim = { ...DIM };
+  private standH = STAND_H;
+  private bodySamples: Sample[] = SAMPLES;
   /** IK targets for debug drawing. */
   debugTargets: Vec[] = [];
 
@@ -192,11 +228,29 @@ export class Stickman {
   equip(w: Weapon | null) {
     this.weapon = w;
     const hand = this.ps[HA1];
-    hand.mass = MASS[HA1] + (w ? w.mass : 0);
+    hand.mass = MASS[HA1] * this.size * this.size + (w ? w.mass : 0);
     hand.invMass = 1 / hand.mass;
-    this.samples = w
-      ? [...SAMPLES, ...weaponSamples(w.length)]
-      : SAMPLES;
+    this.samples = w ? [...this.bodySamples, ...weaponSamples(w.length, this.dim.fore)] : this.bodySamples;
+  }
+
+  /**
+   * Rescale the whole body: bone lengths, joint radii, collision samples and weight
+   * (mass grows with area). Bones stretch to the new lengths over the next steps.
+   */
+  setSize(s: number) {
+    this.size = s;
+    const k = s;
+    this.dim = { neck: DIM.neck * k, spine: DIM.spine * k, upper: DIM.upper * k, fore: DIM.fore * k, thigh: DIM.thigh * k, shin: DIM.shin * k, headR: DIM.headR * k };
+    this.standH = STAND_H * k;
+    const lens = [DIM.neck, DIM.spine, DIM.upper, DIM.fore, DIM.upper, DIM.fore, DIM.thigh, DIM.shin, DIM.thigh, DIM.shin];
+    this.sticks.forEach((st, i) => (st.len = lens[i] * k));
+    this.ps.forEach((p, i) => {
+      p.radius = RADIUS[i] * k;
+      p.mass = MASS[i] * k * k;
+      p.invMass = 1 / p.mass;
+    });
+    this.bodySamples = s === 1 ? SAMPLES : SAMPLES.map((q) => ({ ...q, r: q.r * k }));
+    this.equip(this.weapon);
   }
 
   /** Independent copy of the full simulation state (for imagining outcomes). */
@@ -215,6 +269,10 @@ export class Stickman {
     c.vxSmooth = this.vxSmooth; c.lean = this.lean; c.hipH = this.hipH; c.tiltErrT = this.tiltErrT; c.airT = this.airT;
     c.time = this.time; c.health = this.health; c.koT = this.koT; c.spikeCd = this.spikeCd; c.punchArm = this.punchArm;
     c.holdX = this.holdX;
+    c.attrs = { ...this.attrs };
+    c.tk = this.tk ? { ...this.tk, target: { ...this.tk.target } } : null;
+    c.targetSize = this.targetSize;
+    if (this.size !== 1) c.setSize(this.size);
     return c;
   }
 
@@ -252,7 +310,11 @@ export class Stickman {
     if (a.hit) return false;
     if (a.kind === 'punch') return tip === (a.limb ? 'hand1' : 'hand0') && a.t > 0.07 && a.t < 0.2;
     if (a.kind === 'kick') return tip === (a.limb ? 'foot1' : 'foot0') && a.t > 0.12 && a.t < 0.28;
-    if (a.kind === 'swing') return (tip === 'weapon' || tip === 'hand1') && a.t > (a.dir === 1 ? 0.05 : 0.12) && a.t < (a.dir === 1 ? 0.38 : 0.32);
+    if (a.kind === 'swing') {
+      // dir: 0 = chop, 1 = fend off, 2 = heavy swing (slow windup, big hit)
+      const [t0, t1] = a.dir === 1 ? [0.05, 0.38] : a.dir === 2 ? [0.36, 0.6] : [0.12, 0.32];
+      return (tip === 'weapon' || tip === 'hand1') && a.t > t0 && a.t < t1;
+    }
     return false;
   }
 
@@ -269,10 +331,11 @@ export class Stickman {
     a.target = opts.target ?? { x: this.pelvis.x + 60 * this.facing, y: this.ps[NECK].y };
     a.dir = opts.dir ?? -this.facing;
     if (kind === 'punch') { a.limb = this.weapon ? 0 : this.punchArm; this.punchArm ^= 1; }
-    if (kind === 'swing') { a.limb = 1; a.dir = opts.dir ?? 0; }
+    if (kind === 'swing') { a.limb = 1; a.dir = opts.dir ?? 0; if (a.dir === 2 && opts.dur === undefined) a.dur = 0.85; }
     if (kind === 'kick') a.limb = 1;
-    if (kind === 'jump') this.launch(this.ctrl.moveX * 220, -760);
-    if (kind === 'dodge') this.launch(a.dir * 470, -330);
+    const ag = this.attrs.agility;
+    if (kind === 'jump') this.launch(this.ctrl.moveX * 220 * ag, -760 * Math.sqrt(ag));
+    if (kind === 'dodge') this.launch(a.dir * 470 * ag, -330);
     return true;
   }
 
@@ -284,13 +347,13 @@ export class Stickman {
   hurt(amount: number, source: string, part: Part, stunImpulse = 0) {
     if (!this.alive) return;
     const mul = part === 'head' ? 1.5 : part === 'torso' ? 1 : part === 'arm' ? (this.blocking ? 0.2 : 0.6) : 0.75;
-    const dmg = amount * mul;
+    const dmg = (amount * mul) / this.attrs.tough;
     if (dmg < 0.5) return;
     this.health -= dmg;
     this.flash = 0.15;
     this.hurtLog.push({ time: this.time, amount: dmg, source, part });
     if (this.health <= 0) { this.health = 0; this.koT = 3; this.knockDown(3); return; }
-    if (stunImpulse > 0) this.knockDown(stunImpulse);
+    if (stunImpulse > 0) this.knockDown(stunImpulse / this.attrs.balance);
   }
 
   knockDown(seconds: number) {
@@ -342,6 +405,7 @@ export class Stickman {
   step() {
     const ps = this.ps;
     this.modeT += DT;
+    if (Math.abs(this.targetSize - this.size) > 0.0005) this.setSize(this.size + (this.targetSize - this.size) * 0.03);
     this.flash = Math.max(0, this.flash - DT);
     this.spikeCd = Math.max(0, this.spikeCd - DT);
     if (this.koT > 0) this.koT -= DT;
@@ -374,7 +438,7 @@ export class Stickman {
       return;
     }
     if (this.mode === 'rise') {
-      const k = clamp(this.modeT / 0.9, 0, 1);
+      const k = clamp((this.modeT * this.attrs.balance) / 0.9, 0, 1);
       this.balance = k * k;
       this.tone = 0.2 + 0.8 * k;
       if (k >= 1) this.setMode(down ? 'stand' : 'air');
@@ -383,7 +447,7 @@ export class Stickman {
     // tilt watchdog: too far off upright for too long -> fall over
     const spine = Math.atan2(this.ps[NECK].y - this.ps[PELVIS].y, this.ps[NECK].x - this.ps[PELVIS].x);
     const tilt = Math.abs(wrap(spine + Math.PI / 2));
-    this.tiltErrT = tilt > 70 * DEG ? this.tiltErrT + DT : 0;
+    this.tiltErrT = tilt > Math.min(85, 70 * this.attrs.balance) * DEG ? this.tiltErrT + DT : 0;
     if (this.tiltErrT > 0.25) { this.knockDown(0.9); return; }
 
     if (this.mode === 'air') {
@@ -407,7 +471,8 @@ export class Stickman {
   private updateAction() {
     const a = this.action;
     if (a.kind === 'none') return;
-    a.t += DT;
+    // reflexes speed up every action; weapon swings also get swing speed
+    a.t += DT * this.attrs.reflex * (a.kind === 'swing' ? this.attrs.swing : 1);
     if (a.t >= a.dur || this.mode === 'down') a.kind = 'none';
   }
 
@@ -428,10 +493,10 @@ export class Stickman {
     if (a.kind === 'punch') lean = a.t < 0.08 ? -4 : 16;
     if (a.kind === 'kick') lean = a.t < 0.12 ? -6 : -22;
     if (a.kind === 'dodge') lean = -25 * a.dir * f;
-    if (a.kind === 'swing') lean = a.t < 0.12 ? -10 : 20;
+    if (a.kind === 'swing') lean = a.dir === 2 ? (a.t < 0.36 ? -20 : 28) : a.t < 0.12 ? -10 : 20;
     lean += crouch * 18;
     this.lean = lerp(this.lean, lean, 0.15);
-    this.hipH = lerp(this.hipH, STAND_H - 24 * crouch, 0.2);
+    this.hipH = lerp(this.hipH, this.standH - 24 * crouch * this.size, 0.2);
 
     const neck = ps[NECK];
     // ---- legs
@@ -442,19 +507,20 @@ export class Stickman {
         let tx: number, ty: number;
         if (a.kind === 'kick' && i === a.limb && this.mode === 'stand') {
           const p = this.pelvis;
-          if (a.t < 0.12) { tx = p.x + 10 * f; ty = p.y + 26; }
+          const z = this.size;
+          if (a.t < 0.12) { tx = p.x + 10 * z * f; ty = p.y + 26 * z; }
           else if (a.t < 0.3) { tx = a.target.x; ty = a.target.y; }
-          else { tx = g.plantX; ty = p.y + 45; }
+          else { tx = g.plantX; ty = p.y + 45 * z; }
           this.joints[J.hip0 + i].gain = 1.8;
           this.joints[J.knee0 + i].gain = 1.8;
         } else if (g.swing) {
           const s = g.s;
           const e = s * s * (3 - 2 * s);
           tx = lerp(g.x0, g.x1, e);
-          ty = this.ground(tx, this.pelvis.y + 30) - RADIUS[FT0] - Math.sin(Math.PI * s) * g.lift;
+          ty = this.ground(tx, this.pelvis.y + 30) - this.ps[FT0].radius - Math.sin(Math.PI * s) * g.lift;
         } else {
           tx = g.plantX;
-          ty = this.ground(tx, this.pelvis.y + 30) - RADIUS[FT0];
+          ty = this.ground(tx, this.pelvis.y + 30) - this.ps[FT0].radius;
         }
         this.legIK(i, tx, ty);
       }
@@ -489,38 +555,58 @@ export class Stickman {
       h0 = { x: 9 - walkSwing * 12, y: 6 + Math.abs(walkSwing) * 6 };
       h1 = { x: 16 + walkSwing * 12, y: -3 + Math.abs(walkSwing) * 6 };
     }
-    const hand = [h0, h1].map((h) => ({ x: neck.x + h.x * f, y: neck.y + h.y }));
+    const z = this.size;
+    const hand = [h0, h1].map((h) => ({ x: neck.x + h.x * z * f, y: neck.y + h.y * z }));
     if (a.kind === 'punch') {
       const i = a.limb;
-      if (a.t < 0.07) hand[i] = { x: neck.x - 6 * f, y: neck.y + 14 };
+      if (a.t < 0.07) hand[i] = { x: neck.x - 6 * z * f, y: neck.y + 14 * z };
       else if (a.t < 0.22) {
         // overreach the target so the arm snaps fully straight
         const dx = a.target.x - neck.x, dy = a.target.y - neck.y;
         const d = Math.hypot(dx, dy) || 1;
-        hand[i] = { x: neck.x + (dx / d) * 70, y: neck.y + (dy / d) * 70 };
-        this.joints[J.sh0 + i].gain = 3.2;
-        this.joints[J.el0 + i].gain = 3.2;
+        hand[i] = { x: neck.x + (dx / d) * 70 * z, y: neck.y + (dy / d) * 70 * z };
+        this.joints[J.sh0 + i].gain = 3.2 * this.attrs.reflex;
+        this.joints[J.el0 + i].gain = 3.2 * this.attrs.reflex;
       }
     }
     if (a.kind === 'swing' && a.dir === 1) {
       // fend off: bring the weapon up across the incoming thing's path, then thrust it out
-      const ty = clamp(a.target.y - neck.y, -45, 55);
-      if (a.t < 0.1) hand[1] = { x: neck.x + 14 * f, y: neck.y + ty + 18 };
+      const ty = clamp(a.target.y - neck.y, -45 * z, 55 * z);
+      if (a.t < 0.1) hand[1] = { x: neck.x + 14 * z * f, y: neck.y + ty + 18 * z };
       else if (a.t < 0.36) {
-        hand[1] = { x: neck.x + 34 * f, y: neck.y + ty + 6 };
-        this.joints[J.sh1].gain = 4;
-        this.joints[J.el1].gain = 4;
+        hand[1] = { x: neck.x + 34 * z * f, y: neck.y + ty + 6 * z };
+        this.joints[J.sh1].gain = 4 * this.attrs.swing;
+        this.joints[J.el1].gain = 4 * this.attrs.swing;
+      }
+    } else if (a.kind === 'swing' && a.dir === 2) {
+      // heavy swing: raise it high behind the head, then bring it down with everything
+      if (a.t < 0.36) hand[1] = { x: neck.x - 16 * z * f, y: neck.y - 46 * z };
+      else if (a.t < 0.6) {
+        const dx = a.target.x - neck.x, dy = a.target.y - neck.y;
+        const d = Math.hypot(dx, dy) || 1;
+        hand[1] = { x: neck.x + (dx / d) * 64 * z, y: neck.y + (dy / d) * 64 * z + 18 * z };
+        this.joints[J.sh1].gain = 4.5 * this.attrs.swing;
+        this.joints[J.el1].gain = 4.5 * this.attrs.swing;
+        this.armGain(2);
+        this.joints[J.sh1].gain = 4.5 * this.attrs.swing;
       }
     } else if (a.kind === 'swing') {
       // overhead windup, then a hard chop down and forward through the target
-      if (a.t < 0.12) hand[1] = { x: neck.x - 4 * f, y: neck.y - 40 };
+      if (a.t < 0.12) hand[1] = { x: neck.x - 4 * z * f, y: neck.y - 40 * z };
       else if (a.t < 0.32) {
         const dx = a.target.x - neck.x, dy = a.target.y - neck.y;
         const d = Math.hypot(dx, dy) || 1;
-        hand[1] = { x: neck.x + (dx / d) * 60, y: neck.y + (dy / d) * 60 + 10 };
-        this.joints[J.sh1].gain = 3.5;
-        this.joints[J.el1].gain = 3.5;
+        hand[1] = { x: neck.x + (dx / d) * 60 * z, y: neck.y + (dy / d) * 60 * z + 10 * z };
+        this.joints[J.sh1].gain = 3.5 * this.attrs.swing;
+        this.joints[J.el1].gain = 3.5 * this.attrs.swing;
       }
+    }
+    // telekinesis: the near hand reaches toward the drawing he's steering
+    if (this.tk && a.kind !== 'punch' && a.kind !== 'swing') {
+      const dx = this.tk.target.x - neck.x, dy = this.tk.target.y - neck.y;
+      const d = Math.hypot(dx, dy) || 1;
+      hand[1] = { x: neck.x + (dx / d) * 44 * z, y: neck.y + (dy / d) * 44 * z };
+      if (this.tk.mode !== 'hover') { this.joints[J.sh1].gain = 2.5; this.joints[J.el1].gain = 2.5; }
     }
     for (let i = 0; i < 2; i++) this.armIK(i, hand[i].x, hand[i].y);
     // keep the head level-ish while leaning
@@ -537,7 +623,7 @@ export class Stickman {
     const kicking = this.action.kind === 'kick';
     const speed = Math.abs(this.vxSmooth);
     // stance: near foot forward, far foot back; wider when crouched
-    const half = 11 + crouch * 6;
+    const half = (11 + crouch * 6) * this.size;
     const center = p.x + this.vxSmooth * 0.11;
     let swinging = false;
     for (let i = 0; i < 2; i++) {
@@ -566,7 +652,7 @@ export class Stickman {
     g.x0 = this.ps[LEG[best][1]].x;
     g.x1 = clamp(want, g.x0 - 70, g.x0 + 70);
     g.dur = clamp(0.24 - speed * 0.00018, 0.14, 0.24);
-    g.lift = 9 + speed * 0.025;
+    g.lift = (9 + speed * 0.025) * this.size;
   }
 
   /** Two-bone IK. Returns world angles for both bones. bend = sign of the joint bend. */
@@ -586,7 +672,7 @@ export class Stickman {
   private legIK(i: number, tx: number, ty: number) {
     const ps = this.ps, p = ps[PELVIS], n = ps[NECK];
     this.debugTargets.push({ x: tx, y: ty });
-    const { a1, a2 } = this.ik(p.x, p.y, tx, ty, DIM.thigh, DIM.shin, -this.facing);
+    const { a1, a2 } = this.ik(p.x, p.y, tx, ty, this.dim.thigh, this.dim.shin, -this.facing);
     const spineDown = Math.atan2(p.y - n.y, p.x - n.x);
     this.joints[J.hip0 + i].target = wrap(a1 - spineDown);
     this.joints[J.knee0 + i].target = wrap(a2 - a1);
@@ -595,7 +681,7 @@ export class Stickman {
   private armIK(i: number, tx: number, ty: number) {
     const ps = this.ps, p = ps[PELVIS], n = ps[NECK];
     this.debugTargets.push({ x: tx, y: ty });
-    const { a1, a2 } = this.ik(n.x, n.y, tx, ty, DIM.upper, DIM.fore, this.facing);
+    const { a1, a2 } = this.ik(n.x, n.y, tx, ty, this.dim.upper, this.dim.fore, this.facing);
     const spineUp = Math.atan2(n.y - p.y, n.x - p.x);
     this.joints[J.sh0 + i].target = wrap(a1 - spineUp + Math.PI);
     this.joints[J.el0 + i].target = wrap(a2 - a1);
@@ -737,7 +823,7 @@ export class Stickman {
       const dv = (vyT - vy) * 0.3 * b - GRAVITY * DT * b;
       for (const i of SUPPORTED) ps[i].addVel(0, dv);
       // horizontal drive on the upper body; feet catch up by stepping
-      let want = this.ctrl.moveX * (this.ctrl.run ? RUN_SPEED : WALK_SPEED);
+      let want = this.ctrl.moveX * (this.ctrl.run ? RUN_SPEED : WALK_SPEED) * this.attrs.agility;
       // standing still: hold the spot instead of slowly creeping
       if (this.ctrl.moveX === 0) {
         if (this.holdX === null) this.holdX = p.x;

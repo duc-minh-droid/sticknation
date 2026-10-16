@@ -3,9 +3,9 @@ import type { Reaction } from './policy';
 
 // Plain-English wording for what the brain sees, decides and learns.
 
-const DO: Record<Reaction, string> = { duck: 'duck', jump: 'jump', dodge: 'dodge', block: 'block', ignore: 'ignore it', swat: 'whack it' };
-const DOING: Record<Reaction, string> = { duck: 'ducking', jump: 'jumping', dodge: 'dodging', block: 'blocking', ignore: 'ignoring it', swat: 'whacking it' };
-const LESSON_DO: Record<Reaction, string> = { duck: 'Duck under', jump: 'Jump over', dodge: 'Dodge', block: 'Block', ignore: 'Ignore', swat: 'Whack away' };
+const DO: Record<Reaction, string> = { duck: 'duck', jump: 'jump', dodge: 'dodge', block: 'block', ignore: 'ignore it', swat: 'whack it', shield: 'shield with my drawing' };
+const DOING: Record<Reaction, string> = { duck: 'ducking', jump: 'jumping', dodge: 'dodging', block: 'blocking', ignore: 'ignoring it', swat: 'whacking it', shield: 'shielding' };
+const LESSON_DO: Record<Reaction, string> = { duck: 'Duck under', jump: 'Jump over', dodge: 'Dodge', block: 'Block', ignore: 'Ignore', swat: 'Whack away', shield: 'Shield against' };
 
 function where(t: Threat) {
   if (t.input.above) return 'falling on me';
@@ -32,9 +32,10 @@ export function thinkDefense(t: Threat, r: Reaction, imagined: number[] | null, 
   return `${head} → ${DO[r]}!${why ? ` (${why})` : ''}`;
 }
 
-export function thinkStrike(kind: 'punch' | 'kick' | 'swing', o: { ducking: number; blocking: number; airborne: number; attacking: number; dist: number }): string {
-  const why = kind === 'swing' && o.dist > 66 ? 'out of fist range' : o.ducking ? "he's ducking" : o.blocking ? "he's blocking" : o.attacking ? 'beat him to it' : o.airborne ? "he's in the air" : '';
-  const word = kind === 'swing' ? 'Swing' : kind === 'kick' ? 'Kick' : 'Punch';
+export function thinkStrike(kind: 'punch' | 'kick' | 'swing' | 'heavy' | 'slam', o: { ducking: number; blocking: number; airborne: number; attacking: number; dist: number }): string {
+  const why = kind === 'heavy' && o.blocking ? 'break that guard' : kind === 'swing' && o.dist > 66 ? 'out of fist range' : o.ducking ? "he's ducking" : o.blocking ? "he's blocking" : o.attacking ? 'beat him to it' : o.airborne ? "he's in the air" : '';
+  if (kind === 'slam') return `Slam!${o.dist > 120 ? ' (from range)' : ''}`;
+  const word = kind === 'heavy' ? 'Heavy swing' : kind === 'swing' ? 'Swing' : kind === 'kick' ? 'Kick' : 'Punch';
   return `${word}!${why ? ` (${why})` : ''}`;
 }
 

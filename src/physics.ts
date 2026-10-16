@@ -107,6 +107,10 @@ export class RigidBody {
   closed: boolean;
   boundR: number;
   age = 0;
+  /** Name of the stickman holding this by telekinesis (null = free). */
+  heldBy: string | null = null;
+  /** Whoever has ever held this by telekinesis: it never hurts them, even after it's let go. */
+  owner: string | null = null;
   life = Infinity;
   color: string;
   /** Extra damage multiplier for pointy drawings (thin + fast). */

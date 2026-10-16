@@ -2,7 +2,7 @@ import rough from 'roughjs';
 import type { Drawable, Options } from 'roughjs/bin/core';
 import type { RoughCanvas } from 'roughjs/bin/canvas';
 import { GROUND, H, W, RigidBody } from './physics';
-import { Stickman, HEAD, NECK, PELVIS, EL0, HA0, EL1, HA1, KN0, FT0, KN1, FT1, DIM } from './stickman';
+import { Stickman, HEAD, NECK, PELVIS, EL0, HA0, EL1, HA1, KN0, FT0, KN1, FT1 } from './stickman';
 import { World, Cannon, Cloud, Spikes } from './world';
 import { Vec } from './math';
 import { Solid, shape } from './terrain';
@@ -142,6 +142,7 @@ export function render(ctx: CanvasRenderingContext2D, world: World, ov: Overlay,
   for (const s of world.solids) drawSolid(ctx, s, th, ov.hover?.kind === 'solid' && ov.hover.id === s.id);
   for (const z of world.spikes) drawSpikes(ctx, z, th, ov.hover?.kind === 'spikes' && ov.hover.id === z.id);
   for (const c of world.clouds) drawCloud(ctx, c, th, ov.hover?.kind === 'cloud' && ov.hover.id === c.id);
+  for (const m of world.men) if (m.tk) drawForce(ctx, m, world);
   for (const b of world.bodies) drawBody(ctx, b, th);
   const hero = world.men[0];
   for (const c of world.cannons) drawCannon(ctx, c, hero ? hero.chest : { x: W / 2, y: GROUND - 80 }, th, ov.hover?.kind === 'cannon' && ov.hover.id === c.id);
@@ -271,8 +272,31 @@ function drawCloud(ctx: CanvasRenderingContext2D, c: Cloud, th: Theme, hot: bool
   ctx.restore();
 }
 
+/** Telekinesis: a wavy dotted "force" line from his hand to the drawing he holds. */
+function drawForce(ctx: CanvasRenderingContext2D, m: Stickman, world: World) {
+  const b = world.bodies.find((k) => k.id === m.tk!.bodyId);
+  if (!b) return;
+  const h = m.ps[HA1];
+  const dx = b.x - h.x, dy = b.y - h.y, len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len, ny = dx / len;
+  ctx.save();
+  ctx.strokeStyle = m.tk!.mode === 'hover' ? '#8e4ec6aa' : '#8e4ec6';
+  ctx.lineWidth = m.tk!.mode === 'hover' ? 2 : 3.5;
+  ctx.setLineDash([3, 7]);
+  ctx.lineDashOffset = -boil * 3;
+  ctx.beginPath();
+  for (let i = 0; i <= 16; i++) {
+    const t = i / 16, w = Math.sin(t * Math.PI * 3 + boil) * 6 * Math.sin(t * Math.PI);
+    const x = h.x + dx * t + nx * w, y = h.y + dy * t + ny * w;
+    if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawBody(ctx: CanvasRenderingContext2D, b: RigidBody, th: Theme) {
   ctx.save();
+  if (b.heldBy) { ctx.shadowColor = '#8e4ec6'; ctx.shadowBlur = 18; }
   // drawings get "erased" at the end: fade + slight shrink
   const FADE = 0.8;
   const left = b.life - b.age;
@@ -305,14 +329,14 @@ export function drawMan(ctx: CanvasRenderingContext2D, m: Stickman, th: Theme, d
   const seed = m.team * 1000 + 7;
   ctx.save();
   glow(ctx, hot);
-  const bone = (a: number, b: number, w: number, k: number) => pencil(ctx, ps[a].x, ps[a].y, ps[b].x, ps[b].y, seed + k, w, ink);
+  const bone = (a: number, b: number, w: number, k: number) => pencil(ctx, ps[a].x, ps[a].y, ps[b].x, ps[b].y, seed + k, w * m.size, ink);
   ctx.globalAlpha = m.alive ? 0.5 : 0.3;
   bone(NECK, EL0, 4.5, 1); bone(EL0, HA0, 4.5, 2);
   bone(PELVIS, KN0, 4.5, 3); bone(KN0, FT0, 4.5, 4);
   ctx.globalAlpha = m.alive ? 1 : 0.55;
   bone(PELVIS, NECK, 5.5, 5);
   const h = ps[HEAD];
-  pencilCircle(ctx, h.x, h.y, DIM.headR, seed + 6, 3.8, ink, th.paper);
+  pencilCircle(ctx, h.x, h.y, m.dim.headR, seed + 6, 3.8 * m.size, ink, th.paper);
   // eyes look the way he faces; X's when knocked out
   ctx.fillStyle = ink;
   if (m.alive) {
@@ -333,7 +357,7 @@ export function drawMan(ctx: CanvasRenderingContext2D, m: Stickman, th: Theme, d
   ctx.restore();
 
   // health: a hand-drawn bar
-  const top = Math.min(...ps.map((p) => p.y)) - DIM.headR - 22;
+  const top = Math.min(...ps.map((p) => p.y)) - m.dim.headR - 22;
   const cx = ps[PELVIS].x;
   ctx.fillStyle = m.health > 35 ? m.color : '#e0443b';
   ctx.globalAlpha = 0.75;

@@ -74,6 +74,8 @@ canvas#c {
   cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28'%3E%3Cpath d='M3 25 L6 17 L20 3 L25 8 L11 22 Z' fill='%23ffd166' stroke='%232b2a28' stroke-width='1.6'/%3E%3Cpath d='M3 25 L6 17 L11 22 Z' fill='%23f4e1c1' stroke='%232b2a28' stroke-width='1.4'/%3E%3Cpath d='M3 25 L4.4 21.2 L6.8 23.6 Z' fill='%232b2a28'/%3E%3C/svg%3E") 2 26, crosshair;
 }
 canvas#c.grab { cursor: grab; }
+#zoom { position: absolute; right: 12px; top: 10px; display: flex; gap: 6px; z-index: 3; }
+#zoom button { padding: 0 10px; font-size: 18px; line-height: 26px; }
 canvas#c.grabbing { cursor: grabbing; }
 #hint {
   position: absolute; left: 16px; top: 10px; color: var(--muted); font-size: 18px; pointer-events: none;
@@ -132,6 +134,17 @@ canvas#c.grabbing { cursor: grabbing; }
   border: 2px dashed var(--muted); border-radius: 8px; touch-action: none;
   cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28'%3E%3Cpath d='M3 25 L6 17 L20 3 L25 8 L11 22 Z' fill='%23ffd166' stroke='%232b2a28' stroke-width='1.6'/%3E%3Cpath d='M3 25 L4.4 21.2 L6.8 23.6 Z' fill='%232b2a28'/%3E%3C/svg%3E") 2 26, crosshair;
 }
+.abilities { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 4px 0 8px; }
+.abil {
+  font: 16px var(--hand); color: var(--ink); background: var(--paper); cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 6px 4px;
+  border: 2px solid var(--ink); border-radius: var(--sketch-radius); box-shadow: 2px 3px 0 var(--ink);
+  transition: transform .15s ease, box-shadow .15s, background .2s;
+}
+.abil:hover { transform: translateY(-2px) rotate(-1deg); }
+.abil small { color: var(--muted); font-size: 12px; line-height: 1.1; text-align: center; }
+.abil.on { background: var(--highlight); transform: rotate(-1deg); }
+.ability { font-size: 16px; margin: 2px 0 6px; padding: 4px 8px; background: #fff7d1; border: 1.5px dashed var(--ink); border-radius: 8px; }
 .pad-stats { font-size: 15px; color: var(--muted); margin: 4px 2px; min-height: 20px; }
 .row-btns { display: flex; gap: 8px; flex-wrap: wrap; }
 
@@ -154,6 +167,10 @@ canvas#c.grabbing { cursor: grabbing; }
 .lesson { font-size: 18px; padding: 3px 0 3px 22px; position: relative; }
 .lesson::before { content: '✓'; position: absolute; left: 2px; color: var(--good); font-weight: 700; }
 .lesson .when { color: var(--muted); font-size: 14px; }
+.stat { display: flex; align-items: center; gap: 8px; font-size: 17px; padding: 1px 4px; border-radius: 6px; }
+.stat .name { width: 96px; }
+.stat .hp { height: 9px; }
+.stat .lv { width: 92px; text-align: right; color: var(--muted); font-size: 14px; }
 details { margin-top: 6px; }
 summary { cursor: pointer; color: var(--muted); font-size: 16px; }
 .nerd { font: 12px/1.4 ui-monospace, Menlo, monospace; color: var(--muted); }

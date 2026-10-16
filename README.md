@@ -20,24 +20,31 @@ The dev server is also what saves the AI: brains are written to `brains/<name>.j
 - **Draw anywhere in the arena** to create an object. A quick flick at the end of the stroke throws it. Closed shapes are filled and heavier. Drawings get erased after a few seconds.
 - **Drag items from the grid under the arena** into the scene: enemy, cannon, spikes, rain cloud, ramp, platform, wall, trampoline.
 - **Drag placed items** to move them (enemies can be dropped from mid-air). Drag them back onto the grid to remove them. Double-click a ramp to flip it.
-- **Weapon workshop** (side panel): draw a weapon — start where he holds it — and press *Give it to Blue*. Longer ink = heavier: slower swings that hit harder. He learns when to swing, and uses it to parry punches and swat away projectiles.
+- **Zoom:** scroll to zoom toward the cursor (or the + / − / fit buttons); right- or middle-drag to pan.
+- **Abilities** (side panel) — pick one:
+  - **Base:** he carries a stick. *Swing* is quick; *heavy swing* has a slow windup but breaks blocks and parries. Draw your own weapon on the pad (start where he holds it) to replace the stick — longer ink = heavier, slower, harder-hitting. He also uses the weapon to parry punches and swat away projectiles.
+  - **Telekinesis:** no stick. He grabs the newest of your drawings in reach (not ones you're throwing at him), keeps it floating beside him, **shields** with it, and **slams** it into enemies from range. Draw a new one and he swaps to it. Held drawings aren't erased, and his own drawing never hurts him.
 - **Header:** Pause (P), Slow-mo, Reset (clears the arena; his brain is kept), Learning on/off, Drive Blue.
-- **Drive Blue** (manual): A/D move, Shift run, W jump, S duck, J punch, K kick, F swing, L block, Space dodge.
+- **Drive Blue** (manual): A/D move, Shift run, W jump, S duck, J punch, K kick, F swing, H heavy swing, L block, Space dodge.
 
-The side panel explains him in plain words: a report card (dodges, hits, rounds), what he's thinking, the lessons he's learned, and a progress chart per minute played. *Nerd stats* at the bottom shows the circuit internals.
+The side panel explains him in plain words: a report card (dodges, hits, rounds), his stats, what he's thinking, the lessons he's learned, and a progress chart per minute played. *Nerd stats* at the bottom shows the circuit internals.
+
+### Stats and growth
+
+Blue has six stats — **swing speed, power, reflexes, agility, toughness, balance** — that change how his body actually moves (faster actions, longer jumps, harder hits, less damage, harder to knock over). He earns a small boost by **learning well**: a new lesson (at most every 30 s), 10 clean defences in a row, or winning a round. Boosts shrink as a stat climbs (max +60%). Every 8 levels in total he **grows 6% bigger** (up to 1.5×): longer reach, more weight. His stats are inputs to his decision circuit and his imagined copy has them too, so the AI plans with what his body can do now.
 
 ## How the AI works
 
 Blue's brain (`src/ai.ts`) has three layers:
 
 1. **Perception and common sense.** He predicts the flight path of every object and every enemy strike, and knows the whole arena (walls, spikes, cannons and when they fire next, terrain, enemies). Built-in common sense: ignore things that can't hurt, don't block heavy hits, you can't outrun a fast projectile, don't dodge into a wall or spikes, never swing from out of reach.
-2. **Imagination (planning).** When threats are coming he freezes a copy of the arena — every flying object, every enemy running its fixed logic, cannons about to fire — and replays the next second or so once per option: duck, jump, dodge, block, ignore, swat (if armed), run left, run right. He picks the option that takes the least total damage, and re-plans as new threats arrive. The planner is spread over frames so it doesn't stutter.
+2. **Imagination (planning).** When threats are coming he freezes a copy of the arena — every flying object, every enemy running its fixed logic, cannons about to fire — and replays the next second or so once per option: duck, jump, dodge, block, ignore, swat (if armed), shield (with telekinesis), run left, run right. He picks the option that takes the least total damage, and re-plans as new threats arrive. The planner is spread over frames so it doesn't stutter.
 3. **Learning.**
-   - A **Handwired circuit** (`src/policy.ts`, 356 ops built from affine sums and ReLUs, 155 trainable weights) scores reactions to each kind of threat and chooses punch / kick / swing. Its weights are initialised so it computes the hand-written rules *exactly*, then it trains by backpropagation (Adam, replayed experience weighted toward recent outcomes) on every real and imagined outcome.
+   - A **Handwired circuit** (`src/policy.ts`, 471 ops built from affine sums and ReLUs, 240 trainable weights) scores reactions to each kind of threat and chooses punch / kick / swing / heavy swing / slam. Its weights are initialised so it computes the hand-written rules *exactly*, then it trains by backpropagation on every real and imagined outcome. Training is tuned to generalise: a modest learning rate, a long replay memory sampled mostly uniformly, and a gentle pull back toward the starting rules so one odd outcome can't rewrite what he knows.
    - A **(1+1) evolution strategy** tunes his continuous fighting knobs (reaction timing, aggression, spacing, tempo) from fight results.
-   - Everything — weights, experience, stats, lessons and his weapon — is saved to `brains/Blue.json` and reloaded on start.
+   - Everything — weights, experience, stats, lessons, his ability and weapon — is saved to `brains/Blue.json` and reloaded on start.
 
-Enemies are deliberately simple: hard-coded brawlers that press in and attack, with no learning. Because their logic is fixed, Blue's imagination can predict them exactly. A knocked-out enemy is gone until you drag in a new one.
+Enemies are deliberately simple: hard-coded brawlers that press in and attack, with no learning and no thought bubbles. Place as many as you like; they all gang up on Blue. Because their logic is fixed, Blue's imagination can predict them exactly. A knocked-out enemy is gone until you drag in a new one.
 
 ## Physics
 

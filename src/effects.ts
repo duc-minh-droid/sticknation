@@ -6,9 +6,9 @@ import { rand } from './math';
 // Comic/doodle effects driven by world events: POW bursts, ink splats, dust puffs,
 // eraser crumbs, cannon smoke, "aha!" lightbulbs, and screen shake.
 
-interface Fx { kind: 'pow' | 'ink' | 'dust' | 'crumb' | 'smoke' | 'aha' | 'tink'; x: number; y: number; vx: number; vy: number; t: number; life: number; size: number; rot: number; text?: string; color?: string }
+interface Fx { kind: 'pow' | 'ink' | 'dust' | 'crumb' | 'smoke' | 'aha' | 'tink' | 'buff'; x: number; y: number; vx: number; vy: number; t: number; life: number; size: number; rot: number; text?: string; color?: string }
 
-const WORDS = { object: ['BONK!', 'THUD!', 'OOF!'], punch: ['POW!', 'BAM!'], kick: ['WHAM!', 'BOOF!'], swing: ['WHACK!', 'THWACK!', 'SMACK!'], spikes: ['OUCH!', 'YOW!'] };
+const WORDS = { object: ['BONK!', 'THUD!', 'OOF!'], punch: ['POW!', 'BAM!'], kick: ['WHAM!', 'BOOF!'], swing: ['WHACK!', 'THWACK!', 'SMACK!'], heavy: ['CRUNCH!', 'KRAK!', 'BOOM!'], spikes: ['OUCH!', 'YOW!'] };
 
 export class Effects {
   fx: Fx[] = [];
@@ -39,6 +39,13 @@ export class Effects {
         this.add({ kind: 'pow', x: e.x + e.dir * 26, y: e.y - 6, vx: e.dir * 30, vy: -30, life: 0.45, size: 26, rot: rand(-0.2, 0.2), text: 'BOOM' });
         for (let i = 0; i < 6; i++) this.add({ kind: 'smoke', x: e.x + e.dir * 20, y: e.y, vx: e.dir * rand(20, 90), vy: rand(-60, -10), life: rand(0.5, 0.9), size: rand(8, 16), rot: 0 });
         this.shake = Math.max(this.shake, 3);
+      } else if (e.type === 'guardbreak') {
+        this.add({ kind: 'pow', x: e.x, y: e.y - 36, vx: 0, vy: -25, life: 0.9, size: 62, rot: rand(-0.2, 0.2), text: 'GUARD BREAK!' });
+        for (let i = 0; i < 14; i++) {
+          const a = rand(0, Math.PI * 2), sp = rand(200, 520);
+          this.add({ kind: 'ink', x: e.x, y: e.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 120, life: rand(0.4, 0.7), size: rand(3, 6), rot: a, color: th.ink });
+        }
+        this.shake = Math.max(this.shake, 12);
       } else if (e.type === 'boing') {
         this.add({ kind: 'pow', x: e.x, y: e.y - 20, vx: 0, vy: -40, life: 0.5, size: 28, rot: rand(-0.2, 0.2), text: 'BOING!' });
       } else if (e.type === 'ko') {
@@ -57,6 +64,15 @@ export class Effects {
 
   dust(x: number, y: number, n = 8) {
     for (let i = 0; i < n; i++) this.add({ kind: 'dust', x: x + rand(-20, 20), y, vx: rand(-90, 90), vy: rand(-60, -10), life: rand(0.4, 0.7), size: rand(6, 12), rot: 0 });
+  }
+
+  /** Level-up popup: "+4% reflexes!" rising with a doodled arrow. */
+  buff(x: number, y: number, text: string) {
+    this.add({ kind: 'buff', x, y, vx: 0, vy: -38, life: 1.8, size: 1, rot: 0, text });
+    for (let i = 0; i < 10; i++) {
+      const a = rand(0, Math.PI * 2);
+      this.add({ kind: 'ink', x, y: y + 10, vx: Math.cos(a) * 160, vy: Math.sin(a) * 160 - 80, life: 0.5, size: 2.5, rot: a, color: '#2a9d5c' });
+    }
   }
 
   aha(x: number, y: number) {
@@ -132,6 +148,24 @@ export class Effects {
           ctx.globalAlpha = (1 - k) * 0.7;
           pencilCircle(ctx, 0, 0, f.size * (0.6 + k), 900 + Math.floor(f.vx), 1.5, th.muted);
           break;
+        case 'buff': {
+          const pop = k < 0.15 ? easeOutBack(k / 0.15) : 1;
+          ctx.globalAlpha = k > 0.75 ? (1 - k) / 0.25 : 1;
+          ctx.scale(pop, pop);
+          ctx.font = 'bold 22px "Patrick Hand", cursive';
+          const tw = ctx.measureText(f.text!).width;
+          ctx.fillStyle = th.dark ? '#26323a' : '#e6f6ea';
+          ctx.beginPath(); ctx.roundRect(-tw / 2 - 30, -20, tw + 42, 32, 10); ctx.fill();
+          // up arrow
+          pencil(ctx, -tw / 2 - 18, 6, -tw / 2 - 18, -12, 91, 2.6, '#2a9d5c');
+          pencil(ctx, -tw / 2 - 24, -6, -tw / 2 - 18, -13, 92, 2.6, '#2a9d5c');
+          pencil(ctx, -tw / 2 - 12, -6, -tw / 2 - 18, -13, 93, 2.6, '#2a9d5c');
+          ctx.fillStyle = '#2a9d5c';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(f.text!, -tw / 2 - 4, -3);
+          break;
+        }
         case 'aha': {
           const pop = k < 0.2 ? easeOutBack(k / 0.2) : 1;
           ctx.globalAlpha = k > 0.75 ? (1 - k) / 0.25 : 1;

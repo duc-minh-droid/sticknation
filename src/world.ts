@@ -12,7 +12,8 @@ export interface FloatText { x: number; y: number; text: string; t: number; colo
 
 /** Things that happened this step, for effects (POW!, dust, shake). Drained by the renderer. */
 export type WorldEvent =
-  | { type: 'hit'; x: number; y: number; dmg: number; by: 'object' | 'punch' | 'kick' | 'swing' | 'spikes' }
+  | { type: 'hit'; x: number; y: number; dmg: number; by: 'object' | 'punch' | 'kick' | 'swing' | 'heavy' | 'spikes' }
+  | { type: 'guardbreak'; x: number; y: number }
   | { type: 'block'; x: number; y: number; weapon?: boolean }
   | { type: 'fire'; x: number; y: number; dir: number }
   | { type: 'ko'; x: number; y: number }
@@ -48,6 +49,7 @@ export class World {
       m.step();
       this.collideManTerrain(m);
     }
+    for (const m of this.men) if (m.tk) this.telekinesis(m);
     // fast bodies move in slices no longer than ~4 px, testing the stickmen each slice,
     // so a hard throw can't tunnel through a thin limb
     for (const b of this.bodies) {
@@ -129,7 +131,37 @@ export class World {
 
   // ---------------------------------------------------------------- stickman vs rigid body
 
+  /**
+   * Steer a held drawing toward its target like a strong invisible hand: blend its
+   * velocity toward a spring on the target, cancel gravity, calm the spin. Out of range
+   * (or gone) = let go. A held drawing isn't erased while held.
+   */
+  private telekinesis(m: Stickman) {
+    const tk = m.tk!;
+    const b = this.bodies.find((k) => k.id === tk.bodyId);
+    const c = m.chest;
+    if (!b || !m.alive || Math.hypot(b.x - c.x, b.y - c.y) > 560) {
+      if (b) b.heldBy = null;
+      m.tk = null;
+      return;
+    }
+    b.heldBy = m.name;
+    b.owner = m.name;
+    b.age = Math.min(b.age, Math.max(0, b.life - 1.5)); // stays alive while held
+    if (tk.mode !== 'hover' && m.time > tk.until) tk.mode = 'hover';
+    const fast = tk.mode === 'slam' ? 1800 : tk.mode === 'shield' ? 1400 : 650;
+    const gain = tk.mode === 'slam' ? 16 : tk.mode === 'shield' ? 14 : 7;
+    let vx = (tk.target.x - b.x) * gain, vy = (tk.target.y - b.y) * gain;
+    const sp = Math.hypot(vx, vy);
+    if (sp > fast) { vx *= fast / sp; vy *= fast / sp; }
+    const k = tk.mode === 'hover' ? 0.18 : 0.35;
+    b.vx += (vx - b.vx) * k;
+    b.vy += (vy - b.vy) * k - 1800 * DT;
+    b.w *= tk.mode === 'slam' ? 0.98 : 0.9;
+  }
+
   private collideManBody(m: Stickman, b: RigidBody) {
+    if (b.heldBy === m.name) return; // his own drawing never hits him
     const bb = m.bounds();
     if (b.x + b.boundR < bb.x0 - 8 || b.x - b.boundR > bb.x1 + 8 || b.y + b.boundR < bb.y0 - 8 || b.y - b.boundR > bb.y1 + 8) return;
     let bestJ = 0, bestS: Sample | null = null, bestP: Vec = { x: 0, y: 0 };
@@ -172,7 +204,7 @@ export class World {
       }
     }
     b.updateWorld();
-    if (bestS && bestJ > HURT_J0) {
+    if (bestS && bestJ > HURT_J0 && b.owner !== m.name) {
       const key = `${b.id}:${m.name}`;
       const last = this.hitCd.get(key) ?? -1;
       if (this.time - last < 0.35) return;
@@ -181,11 +213,14 @@ export class World {
       // fending with a weapon: blows to the arm holding it are taken by the weapon
       const fending = m.weapon && (m.action.kind === 'swing' || m.action.kind === 'block');
       if (fending && bestS.part === 'arm') dmg *= 0.1;
-      const stun = bestJ > 5500 ? clamp(bestJ / 5000, 0.6, 2) : 0;
+      const stun = bestJ > 5500 * m.attrs.balance ? clamp(bestJ / 5000, 0.6, 2) : 0;
       const before = m.health;
       m.hurt(dmg, `body:${b.id}`, bestS.part, stun);
       const lost = before - m.health;
       if (lost >= 1) {
+        // a drawing slammed by someone's telekinesis counts as their hit
+        const owner = b.heldBy ? this.men.find((o) => o.name === b.heldBy) : null;
+        if (owner) owner.dealt += lost;
         this.addText({ x: bestP.x, y: bestP.y - 20 }, `-${Math.round(lost)}`, '#d64545');
         this.events.push({ type: 'hit', x: bestP.x, y: bestP.y, dmg: lost, by: 'object' });
         if (!m.alive) this.events.push({ type: 'ko', x: m.head.x, y: m.head.y });
@@ -234,6 +269,18 @@ export class World {
   private strike(att: Stickman, vic: Stickman, s: Sample, j: number, at: Vec, nx: number) {
     att.action.hit = true;
     const kind = att.action.kind;
+    const heavy = kind === 'swing' && att.action.dir === 2;
+    // a heavy swing goes straight through a block or a parry and knocks the defender over
+    if (heavy && (vic.blocking || s.part === 'weapon')) {
+      const before = vic.health;
+      vic.hurt(clamp((j - 150) / 60, 8, 22) * att.attrs.power, `man:${att.name}:heavy`, 'torso', 1.0);
+      att.dealt += before - vic.health;
+      for (const p of vic.ps) p.addVel(-nx * 420 * att.attrs.power, -160);
+      this.addText({ x: at.x, y: at.y - 18 }, `-${Math.round(before - vic.health)}`, '#c97a1d');
+      this.events.push({ type: 'guardbreak', x: at.x, y: at.y });
+      if (!vic.alive) this.events.push({ type: 'ko', x: vic.head.x, y: vic.head.y });
+      return;
+    }
     if (s.part === 'weapon') {
       // parried: the strike lands on the weapon, the attacker bounces off
       for (const p of att.ps) p.addVel(nx * 220, -60);
@@ -244,22 +291,22 @@ export class World {
       return;
     }
     const swing = kind === 'swing';
-    const cap = kind === 'kick' ? 20 : swing ? 16 + Math.min(14, att.weapon ? att.weapon.mass * 2 : 0) : 14;
-    const dmg = clamp((j - 150) / 70, 3, cap);
+    const cap = kind === 'kick' ? 20 : heavy ? 28 + Math.min(10, att.weapon ? att.weapon.mass * 2 : 0) : swing ? 16 + Math.min(14, att.weapon ? att.weapon.mass * 2 : 0) : 14;
+    const dmg = clamp((j - 150) / 70, 3, cap) * att.attrs.power;
     const before = vic.health;
     const blocked = vic.blocking && s.part === 'arm';
     vic.hurt(dmg, `man:${att.name}:${kind}`, s.part, dmg > 13 && !vic.blocking ? 0.5 : 0);
     const lost = before - vic.health;
     att.dealt += lost;
     // knockback toward the victim's side
-    const push = (kind === 'kick' ? 260 : swing ? 300 : 160) * (vic.blocking ? 0.4 : 1);
+    const push = ((kind === 'kick' ? 260 : heavy ? 450 : swing ? 300 : 160) * (vic.blocking ? 0.4 : 1) * att.attrs.power) / vic.attrs.balance;
     for (const p of vic.ps) p.addVel(-nx * push, -40);
     if (blocked) {
       this.addText({ x: at.x, y: at.y - 18 }, 'block', '#5b7fb5');
       this.events.push({ type: 'block', x: at.x, y: at.y });
     } else {
       this.addText({ x: at.x, y: at.y - 18 }, `-${Math.round(lost)}`, '#c97a1d');
-      this.events.push({ type: 'hit', x: at.x, y: at.y, dmg: lost, by: kind === 'kick' ? 'kick' : swing ? 'swing' : 'punch' });
+      this.events.push({ type: 'hit', x: at.x, y: at.y, dmg: lost, by: kind === 'kick' ? 'kick' : heavy ? 'heavy' : swing ? 'swing' : 'punch' });
     }
     if (!vic.alive) this.events.push({ type: 'ko', x: vic.head.x, y: vic.head.y });
   }

@@ -1,5 +1,6 @@
 import { animate } from 'motion';
-import { Brain, PARAMS, REACTIONS } from './ai';
+import { Brain, PARAMS, REACTIONS, STAT_LABEL, statValue, sizeFor, LEVELS_PER_GROWTH } from './ai';
+import { STAT_NAMES } from './stickman';
 import { W } from './physics';
 import { pencilBox, type Theme } from './render';
 import { saveState } from './persist';
@@ -34,6 +35,9 @@ export class Hud {
   private chart = el('div');
   private played = el('p', 'muted');
   private nerd = el('div', 'nerd');
+  private statRows = el('div', 'stats');
+  private lastBuffNote = el('p', 'muted');
+  private statKey = '';
   private nerdOpen = false;
   private lastThoughtAt = -1;
   private lessonKey = '';
@@ -45,6 +49,8 @@ export class Hud {
     const dodge = el('div', 'card');
     dodge.append(document.createTextNode('Dodged '), this.dodged, this.dodgedOf, this.trend);
     report.append(dodge, this.hits, this.rounds);
+    const statsNote = el('div', 'note', '<div class="tape"></div><h2>Stats</h2><p class="sub">Small boosts when he learns something, strings together 10 clean dodges, or wins a round.</p>');
+    statsNote.append(this.statRows, this.lastBuffNote);
     const think = el('div', 'note', '<div class="tape"></div><h2>What he\'s thinking</h2>');
     think.append(this.thought, this.watching);
     const learned = el('div', 'note', '<div class="tape"></div><h2>Things he\'s learned</h2>');
@@ -55,7 +61,7 @@ export class Hud {
     nerd.append(el('summary', '', 'nerd stats'), this.nerd);
     nerd.addEventListener('toggle', () => { this.nerdOpen = nerd.open; });
     progress.append(nerd);
-    root.append(health, report, think, learned, progress);
+    root.append(health, report, statsNote, think, learned, progress);
   }
 
   update(hero: Brain, enemies: Brain[]) {
@@ -92,6 +98,27 @@ export class Hud {
     if (hits.length) this.hits.innerHTML = `Hits landed: <b>${sum(hits)}</b> of the last ${hits.length}`;
     this.rounds.hidden = !enemies.length && st.wins + st.losses === 0;
     this.rounds.innerHTML = `Rounds: <b>${st.wins}</b> won · ${st.losses} lost`;
+
+    // ---- stats
+    const sk = STAT_NAMES.map((s) => hero.levels[s]).join(',');
+    if (sk !== this.statKey) {
+      const old = this.statKey.split(',');
+      const changed = this.statKey ? STAT_NAMES.filter((s, i) => String(hero.levels[s]) !== old[i]) : [];
+      this.statKey = sk;
+      this.statRows.innerHTML = STAT_NAMES.map((s) => {
+        const pct = Math.round((statValue(hero.levels[s]) - 1) * 100);
+        return `<div class="stat" data-s="${s}"><span class="name">${STAT_LABEL[s]}</span><div class="hp"><i style="width:${(pct / 60) * 100}%;background:var(--good)"></i></div><span class="lv">${hero.levels[s] ? `lv ${hero.levels[s]} · +${pct}%` : '—'}</span></div>`;
+      }).join('');
+      for (const s of changed) {
+        const row = this.statRows.querySelector<HTMLElement>(`[data-s="${s}"]`);
+        if (row) animate(row, { scale: [1.08, 1], backgroundColor: ['#ffe24d', 'rgba(0,0,0,0)'] }, { duration: 0.8 });
+      }
+      const b = hero.buffs[0];
+      const total = hero.totalLevels();
+      const toNext = LEVELS_PER_GROWTH - (total % LEVELS_PER_GROWTH);
+      const size = Math.round(sizeFor(total) * 100);
+      this.lastBuffNote.textContent = `Size ${size}%${size < 150 ? ` · grows in ${toNext} more level${toNext > 1 ? 's' : ''}` : ' (max)'}. ${b ? `Last boost: ${STAT_LABEL[b.stat]} (${b.why}).` : 'No boosts yet.'}`;
+    }
 
     // ---- thinking
     const th = hero.thought;

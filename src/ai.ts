@@ -1,5 +1,5 @@
-import { DT, GROUND, GRAVITY, W } from './physics';
-import { Stickman, HEAD, NECK, PELVIS, Weapon } from './stickman';
+import { DT, GROUND, GRAVITY, W, RigidBody } from './physics';
+import { Stickman, HEAD, NECK, PELVIS, Weapon, Attributes, STAT_NAMES } from './stickman';
 import { World, HURT_J0, HURT_PER } from './world';
 import { Vec, clamp, gauss, rand } from './math';
 import { thinkDefense, thinkStrike, lesson } from './explain';
@@ -32,6 +32,23 @@ export interface Threat {
 }
 
 export interface Thought { text: string; at: number; mood: 'think' | 'good' | 'bad' }
+
+// ---------------------------------------------------------------------------
+// Stats: each level adds a little, with diminishing returns: 1 + CAP * (1 - DECAY^level).
+// Level 1 ≈ +4%, level 10 ≈ +31%, never above +60%.
+// ---------------------------------------------------------------------------
+export type StatName = keyof Attributes;
+export const STAT_LABEL: Record<StatName, string> = { swing: 'Swing speed', power: 'Power', reflex: 'Reflexes', agility: 'Agility', tough: 'Toughness', balance: 'Balance' };
+const STAT_CAP = 0.6, STAT_DECAY = 0.93, MAX_LEVEL = 30;
+export const statValue = (level: number) => 1 + STAT_CAP * (1 - STAT_DECAY ** level);
+/** Every 8 stat levels in total he grows 6% bigger, up to 1.5x. */
+export const LEVELS_PER_GROWTH = 8;
+export const sizeFor = (total: number) => Math.min(1.5, 1 + 0.06 * Math.floor(total / LEVELS_PER_GROWTH));
+/** 0 at baseline, 1 at the cap: how the circuit sees a stat. */
+const statFeature = (mult: number) => clamp((mult - 1) / STAT_CAP, 0, 1);
+/** Which stat a successful reaction trains. */
+const REACTION_STAT: Record<Reaction, StatName> = { duck: 'reflex', jump: 'agility', dodge: 'agility', block: 'balance', ignore: 'tough', swat: 'swing', shield: 'reflex' };
+export interface Buff { stat: StatName; level: number; why: string; at: number }
 export interface Lesson { text: string; at: number }
 
 /** What the brain knows about the whole arena, refreshed every frame. */
@@ -47,10 +64,12 @@ export interface Arena {
 }
 
 const DODGE_REACH = 190;
+/** How far a telekinetic slam reaches. */
+const TK_RANGE = 380;
 /** Pelvis-to-pelvis distance a strike can still land from. */
 const REACH = 66;
 /** What each move costs even when it works (dodging gives up ground and tempo). */
-const COST: Record<Reaction, number> = { duck: 0, jump: 0.1, dodge: 0.2, block: 0.05, ignore: 0, swat: 0 };
+const COST: Record<Reaction, number> = { duck: 0, jump: 0.1, dodge: 0.2, block: 0.05, ignore: 0, swat: 0, shield: 0 };
 /** A scratch (under SCRATCH damage) still counts as fended off, just slightly less good. */
 const SCRATCH = 3;
 const rewardFor = (r: Reaction, dmg: number) => (dmg >= SCRATCH ? -0.2 - Math.min(1, dmg / 25) : 1 - COST[r] - dmg * 0.05);
@@ -69,6 +88,18 @@ export function perform(me: Stickman, r: Reaction, t: Threat) {
       me.start('block', { dur: Math.max(0.3, t.ttc + 0.2) });
       break;
     case 'ignore': break;
+    case 'shield': {
+      // park the held drawing in the way: on the incoming path just before it reaches him,
+      // or between him and the enemy for a strike
+      if (!me.tk) break;
+      const p = t.path.length
+        ? t.path[clamp(Math.round((t.ttc - 0.1) * 60), 0, t.path.length - 1)]
+        : { x: me.pelvis.x - Math.sign(t.vx || -me.facing) * 48 * me.size, y: GROUND - t.height };
+      me.tk.mode = 'shield';
+      me.tk.target = { x: p.x, y: p.y };
+      me.tk.until = me.time + t.ttc + 0.35;
+      break;
+    }
     case 'swat': {
       if (!me.weapon) break;
       const face = Math.sign(t.impact.x - me.pelvis.x) || me.facing;
@@ -107,10 +138,12 @@ const PLAN_BUDGET_MS = 6;
 const RUN_COST = 0.25;
 interface StrikePending { x: number[]; a: number; endAt: number; dealt0: number; hurt0: number }
 
-const REPLAY = 800;
-const BATCH = 12;
-const TRAIN_STEPS = 3;   // backprop steps per frame
-const IMPRINT_STEPS = 8; // extra steps on each new outcome
+// Learning is tuned to generalise: a long memory, mostly uniform replay, a modest
+// learning rate (policy.ts) and only a light nudge from each single outcome.
+const REPLAY = 2000;
+const BATCH = 24;
+const TRAIN_STEPS = 2;   // backprop steps per frame
+const IMPRINT_STEPS = 2; // extra steps on each new real outcome
 
 /** Lifetime counters; persisted. */
 export interface Stats {
@@ -143,6 +176,9 @@ export interface BrainSave {
   lessons?: Lesson[];
   bestByCtx?: Record<string, Reaction>;
   weapon?: Weapon | null;
+  ability?: 'base' | 'tk';
+  levels?: Partial<Record<StatName, number>>;
+  buffs?: Buff[];
 }
 
 export interface ParamSpec { key: string; lo: number; hi: number; init: number; label: string }
@@ -152,6 +188,7 @@ export const PARAMS: ParamSpec[] = [
   { key: 'leadDodge', lo: 0.05, hi: 0.7, init: 0.3, label: 'dodge lead (s)' },
   { key: 'leadBlock', lo: 0.03, hi: 0.5, init: 0.18, label: 'block lead (s)' },
   { key: 'leadSwat', lo: 0.05, hi: 0.5, init: 0.2, label: 'swat lead (s)' },
+  { key: 'leadShield', lo: 0.15, hi: 0.8, init: 0.45, label: 'shield lead (s)' },
   { key: 'aggression', lo: 0, hi: 1, init: 0.6, label: 'aggression' },
   { key: 'range', lo: 35, hi: 80, init: 55, label: 'attack range' },
   { key: 'tempo', lo: 0.3, hi: 2, init: 0.9, label: 'attack cooldown' },
@@ -183,6 +220,12 @@ export class Brain {
   strikePending: StrikePending | null = null;
   stats: Stats = freshStats();
   thought: Thought | null = null;
+  levels: Record<StatName, number> = { swing: 0, power: 0, reflex: 0, agility: 0, tough: 0, balance: 0 };
+  buffs: Buff[] = [];
+  private lastWorld: World | null = null;
+  private lastLessonBuff = -1e9;
+  private streak = 0;
+  private streakUse: Partial<Record<StatName, number>> = {};
   lessons: Lesson[] = [];
   /** current favourite reaction per situation, to notice when it changes */
   bestByCtx: Record<string, Reaction> = {};
@@ -204,6 +247,8 @@ export class Brain {
   imagination = true;
   /** Enemies: fixed hand-written rules, no learning, no imagination, nothing saved. */
   isScripted = false;
+  /** Base = stick (swing / heavy swing). Telekinesis = steers one of your drawings. */
+  ability: 'base' | 'tk' = 'base';
   scripted() {
     this.isScripted = true;
     this.learning = false;
@@ -239,13 +284,38 @@ export class Brain {
     return best;
   }
 
+  // ------------------------------------------------------------- stats & buffs
+
+  applyLevels() {
+    for (const s of STAT_NAMES) this.me.attrs[s] = statValue(this.levels[s]);
+    this.me.targetSize = sizeFor(this.totalLevels());
+  }
+
+  totalLevels() { return STAT_NAMES.reduce((a, s) => a + this.levels[s], 0); }
+
+  /** Earn a level in a stat (no-op for scripted enemies). */
+  buff(world: World, stat: StatName, why: string) {
+    if (this.isScripted || this.levels[stat] >= MAX_LEVEL) return;
+    const before = this.me.attrs[stat];
+    this.levels[stat]++;
+    this.applyLevels();
+    const pct = Math.round((this.me.attrs[stat] - before) * 100);
+    this.buffs.unshift({ stat, level: this.levels[stat], why, at: this.stats.playTime });
+    if (this.buffs.length > 20) this.buffs.pop();
+    const grew = sizeFor(this.totalLevels()) > sizeFor(this.totalLevels() - 1);
+    this.lastBuff = { text: grew ? `Growing! (+${Math.max(1, pct)}% ${STAT_LABEL[stat].toLowerCase()})` : `+${Math.max(1, pct)}% ${STAT_LABEL[stat].toLowerCase()}!`, at: world.time };
+    this.dirty = true;
+  }
+  /** The newest buff, for the level-up popup. */
+  lastBuff: { text: string; at: number } | null = null;
+
   /** A knockout ends a round: count wins and losses against an enemy. */
   private countRounds(world: World) {
     const foe = world.men.find((m) => m !== this.me && m.team !== this.me.team);
     if (!foe) return;
     const meOut = !this.me.alive, foeOut = !foe.alive;
     if (meOut && !this.koSeen.me) { this.stats.losses++; this.think_(world, 'Knocked out…', 'bad'); }
-    if (foeOut && !this.koSeen.enemy) { this.stats.wins++; this.think_(world, 'Knocked him out!', 'good'); }
+    if (foeOut && !this.koSeen.enemy) { this.stats.wins++; this.think_(world, 'Knocked him out!', 'good'); this.buff(world, 'power', 'won a round'); }
     this.koSeen = { me: meOut, enemy: foeOut };
   }
 
@@ -265,6 +335,11 @@ export class Brain {
       wallRight: W - cx,
       enemy: enemy ? `${enemy.name} ${Math.round(Math.abs(enemy.pelvis.x - cx))}px ${enemy.mode}${enemy.busy ? ' ' + enemy.action.kind : ''}` : 'none',
     };
+  }
+
+  private statInputs() {
+    const a = this.me.attrs;
+    return { sReflex: statFeature(a.reflex), sAgility: statFeature(a.agility), sTough: statFeature(a.tough), sSwing: this.me.weapon ? statFeature(a.swing) : 0, tk: this.me.tk ? 1 : 0 };
   }
 
   /** Can I dodge this way without hitting a wall or landing in spikes? */
@@ -294,6 +369,7 @@ export class Brain {
     const topY = Math.min(me.ps[HEAD].y - 11, GROUND - 140);
     const out: Threat[] = [];
     for (const b of world.bodies) {
+      if (b.owner === me.name) continue; // his own drawing is never a threat to him
       const dx = b.x - cx;
       if (Math.abs(dx) > 900) continue;
       const sp = b.speed;
@@ -325,7 +401,7 @@ export class Brain {
       const away = Math.sign(cx - hit.p.x) || -Math.sign(b.vx) || -me.facing;
       const preferred = above ? away : Math.abs(b.vx) > 200 ? Math.sign(b.vx) : away;
       const esc = this.escape(world, preferred, above);
-      const input: DefenseInput = { height, speed: sp, size: r, punch: 0, kick: 0, above: above ? 1 : 0, flying: above ? 0 : 1, harm, ttc: hit.t, cornered: esc.cornered, armed: me.weapon ? 1 : 0 };
+      const input: DefenseInput = { height, speed: sp, size: r, punch: 0, kick: 0, above: above ? 1 : 0, flying: above ? 0 : 1, harm, ttc: hit.t, cornered: esc.cornered, armed: me.weapon ? 1 : 0, ...this.statInputs() };
       const what = b.kind === 'ball' ? 'cannonball' : b.kind === 'rock' ? 'rock' : 'drawing';
       out.push({ key, source: `body:${b.id}`, ttc: hit.t, height, impact: hit.p, vx: b.vx, path, input, dodgeDir: esc.dir, what });
     }
@@ -341,7 +417,7 @@ export class Brain {
       const height = a.kind === 'kick' ? 50 : GROUND - a.target.y;
       const esc = this.escape(world, enemy.facing, false);
       const kind = a.kind === 'kick' ? 'kick' : 'punch';
-      const input: DefenseInput = { height, speed: 0, size: 0, punch: kind === 'punch' ? 1 : 0, kick: kind === 'kick' ? 1 : 0, above: 0, flying: 0, harm: kind === 'kick' ? 15 : 10, ttc, cornered: esc.cornered, armed: me.weapon ? 1 : 0 };
+      const input: DefenseInput = { height, speed: 0, size: 0, punch: kind === 'punch' ? 1 : 0, kick: kind === 'kick' ? 1 : 0, above: 0, flying: 0, harm: kind === 'kick' ? 15 : 10, ttc, cornered: esc.cornered, armed: me.weapon ? 1 : 0, ...this.statInputs() };
       out.push({ key: `enemy ${kind}`, source: `man:${enemy.name}:${a.kind}`, ttc, height, impact: { x: cx, y: GROUND - height }, vx: enemy.facing * 300, path: [], input, dodgeDir: esc.dir, what: kind });
     }
     return out.sort((p, q) => p.ttc - q.ttc);
@@ -364,7 +440,7 @@ export class Brain {
   private startPlanning(world: World, threats: Threat[], key: string) {
     const first = threats[0];
     const near = (x: number) => Math.abs(x - this.me.pelvis.x) < 900;
-    const bodies = world.bodies.filter((b) => (b.speed > 60 && near(b.x)) || threats.some((t) => t.source === `body:${b.id}`)).map((b) => b.clone());
+    const bodies = world.bodies.filter((b) => (b.speed > 60 && near(b.x)) || b.heldBy === this.me.name || threats.some((t) => t.source === `body:${b.id}`)).map((b) => b.clone());
     const me0 = this.me.clone();
     const foes = world.men.filter((m) => m !== this.me && m.team !== this.me.team && near(m.pelvis.x));
     const foes0 = foes.map((m) => ({ m: m.clone(), cd: 0, brain: world.men.indexOf(m) }));
@@ -390,7 +466,7 @@ export class Brain {
       for (const b of bodies) w.bodies.push(b.clone());
       return { w, me, foes: brains };
     };
-    const plans: Plan[] = REACTIONS.filter((r) => r !== 'swat' || this.me.weapon).map((r): Plan => ({ kind: 'react', r }));
+    const plans: Plan[] = REACTIONS.filter((r) => (r !== 'swat' || this.me.weapon) && (r !== 'shield' || this.me.tk)).map((r): Plan => ({ kind: 'react', r }));
     for (const dir of [-1, 1]) if (this.dodgeClear(world, dir)) plans.push({ kind: 'run', dir });
     const horizon = clamp(Math.max(...threats.map((t) => t.ttc)) + 0.45, 0.6, 1.4);
     this.planning = { key, first, threats, startedAt: time, horizon, fork, plans, total: [], firstDmg: [], next: 0 };
@@ -441,7 +517,7 @@ export class Brain {
       if (p.kind !== 'react') return;
       const a = REACTIONS.indexOf(p.r);
       scores[a] = rewardFor(p.r, pl.firstDmg[i]);
-      if (this.learning) this.remember(this.replayDefense, { x: toVec(DEFENSE_KEYS, t.input), a, r: scores[a] }, true, 3);
+      if (this.learning) this.remember(this.replayDefense, { x: toVec(DEFENSE_KEYS, t.input), a, r: scores[a] }, true, 1);
     });
     this.noticeLesson(t.key, t.input);
     const best = pl.plans[bi];
@@ -468,7 +544,7 @@ export class Brain {
     this.contexts.set(t.key, t.input);
     this.lastImagined = '';
     let r: Reaction;
-    const allowed = REACTIONS.filter((x) => x !== 'swat' || this.me.weapon);
+    const allowed = REACTIONS.filter((x) => (x !== 'swat' || this.me.weapon) && (x !== 'shield' || this.me.tk));
     if (Math.random() < this.explore(t.key)) r = allowed.filter((x) => x !== 'ignore')[Math.floor(Math.random() * (allowed.length - 1))];
     else {
       const v = this.net.defense(t.input);
@@ -493,11 +569,16 @@ export class Brain {
     if (!before || before === now) return;
     this.lessons.unshift({ text: lesson(key, now, before, this.lastFail[key] === before), at: this.stats.playTime });
     if (this.lessons.length > 8) this.lessons.pop();
+    // learning something real makes him a bit better at it (at most every 30 s of play)
+    if (this.stats.playTime - this.lastLessonBuff > 30 && this.lastWorld) {
+      this.lastLessonBuff = this.stats.playTime;
+      this.buff(this.lastWorld, REACTION_STAT[now], `learned: ${lesson(key, now, before, false).toLowerCase()}`);
+    }
   }
 
   /** Pick punch / kick / swing. Only what can reach is allowed (fists and feet don't reach as far as a weapon). */
   private chooseStrike(world: World, o: OffenseInput): number {
-    const allowed = [0, 1, 2].filter((i) => (i === 2 ? !!this.me.weapon : o.dist < REACH));
+    const allowed = [0, 1, 2, 3, 4].filter((i) => (i === 4 ? !!this.me.tk && o.dist < TK_RANGE : i >= 2 ? !!this.me.weapon : o.dist < REACH * this.me.size));
     if (!allowed.length) return -1;
     let a: number;
     if (this.isScripted) {
@@ -509,10 +590,47 @@ export class Brain {
     return a;
   }
 
+  /**
+   * Telekinesis upkeep: grab one of your drawings that isn't flying at him (newest one in
+   * reach), swap to a newer one when you draw it, and keep the held one hovering beside
+   * him on the side trouble is coming from.
+   */
+  private manageTelekinesis(world: World, threats: Threat[], enemy: Stickman | null) {
+    const me = this.me, c = me.chest;
+    const incoming = new Set(threats.map((t) => t.source));
+    let newest: RigidBody | null = null;
+    for (const b of world.bodies) {
+      if (b.kind !== 'drawn' || (b.heldBy && b.heldBy !== me.name) || incoming.has(`body:${b.id}`)) continue;
+      if (b.age > b.life - 0.6 || b.speed > 500 || Math.hypot(b.x - c.x, b.y - c.y) > 520) continue;
+      if (!newest || b.id > newest.id) newest = b;
+    }
+    const side = enemy ? Math.sign(enemy.pelvis.x - c.x) || me.facing : threats[0] ? Math.sign(threats[0].impact.x - c.x) || me.facing : me.facing;
+    const hover = { x: c.x + side * 82 * me.size, y: c.y - 58 * me.size };
+    if (newest && (!me.tk || newest.id > me.tk.bodyId)) {
+      const old = me.tk ? world.bodies.find((b) => b.id === me.tk!.bodyId) : null;
+      if (old) old.heldBy = null;
+      newest.heldBy = me.name;
+      newest.owner = me.name;
+      this.think_(world, me.tk ? 'Ooh, a new one!' : 'Got your drawing!', 'good');
+      me.tk = { bodyId: newest.id, mode: 'hover', target: hover, until: 0 };
+    }
+    if (me.tk && me.tk.mode === 'hover') me.tk.target = hover;
+  }
+
+  /** Let go of the held drawing (switching ability). */
+  releaseTelekinesis(world: World) {
+    if (!this.me.tk) return;
+    const b = world.bodies.find((k) => k.id === this.me.tk!.bodyId);
+    if (b) b.heldBy = null;
+    this.me.tk = null;
+  }
+
   /** Where to fight from: the tuned range, but never beyond what my best strike reaches. */
   private strikeRange() {
+    if (this.me.tk) return TK_RANGE * 0.8; // telekinesis fights from a distance
     const extra = this.me.weapon ? this.me.weapon.length * 0.9 : 0;
-    return Math.min(this.params.range + extra, REACH + extra);
+    const reach = REACH * this.me.size; // longer limbs reach further
+    return Math.min(this.params.range * this.me.size + extra, reach + extra);
   }
 
   private remember(buf: Sample[], s: Sample, defense: boolean, imprint = IMPRINT_STEPS) {
@@ -524,8 +642,9 @@ export class Brain {
   }
 
   /**
-   * Backprop steps every frame on replayed experience, weighted hard toward the newest
-   * outcomes (3 of 4 picks from the last 20): fast adaptation over generality, by design.
+   * Backprop steps every frame on replayed experience: 3 of 4 picks from the whole
+   * memory (so lessons from all kinds of situations stay balanced), 1 in 4 from the
+   * newest 50 (so he still adapts).
    */
   private learn() {
     if (!this.learning) return;
@@ -533,7 +652,7 @@ export class Brain {
       const out: Sample[] = [];
       if (!buf.length) return out;
       for (let i = 0; i < BATCH; i++) {
-        const lo = i % 4 !== 0 ? Math.max(0, buf.length - 20) : 0;
+        const lo = i % 4 === 0 ? Math.max(0, buf.length - 50) : 0;
         out.push(buf[lo + Math.floor(Math.random() * (buf.length - lo))]);
       }
       return out;
@@ -548,7 +667,9 @@ export class Brain {
 
   private lead(r: Reaction): number {
     const p = this.params;
-    return r === 'duck' ? p.leadDuck : r === 'jump' ? p.leadJump : r === 'dodge' ? p.leadDodge : r === 'block' ? p.leadBlock : r === 'swat' ? p.leadSwat : 0;
+    // quicker reflexes (and swings) mean he can wait longer before reacting
+    const q = this.me.attrs.reflex * (r === 'swat' ? this.me.attrs.swing : 1);
+    return (r === 'duck' ? p.leadDuck : r === 'jump' ? p.leadJump : r === 'dodge' ? p.leadDodge : r === 'block' ? p.leadBlock : r === 'swat' ? p.leadSwat : r === 'shield' ? p.leadShield : 0) / q;
   }
 
   private resolve(world: World) {
@@ -572,6 +693,18 @@ export class Brain {
     if (ok) this.stats.defended++;
     this.stats.recent.push(ok ? 1 : 0);
     if (this.stats.recent.length > 50) this.stats.recent.shift();
+    if (ok) {
+      this.streak++;
+      const st = REACTION_STAT[pd.reaction];
+      this.streakUse[st] = (this.streakUse[st] ?? 0) + 1;
+      if (this.streak >= 10) {
+        let best: StatName = 'reflex', n = -1;
+        for (const [k, v] of Object.entries(this.streakUse)) if (v! > n) { n = v!; best = k as StatName; }
+        this.buff(world, best, '10 in a row without a scratch');
+        this.streak = 0;
+        this.streakUse = {};
+      }
+    } else { this.streak = 0; this.streakUse = {}; }
     const minute = Math.floor(this.stats.playTime / 60);
     while (this.stats.minutes.length <= minute) this.stats.minutes.push({ n: 0, ok: 0 });
     this.stats.minutes[minute].n++;
@@ -617,6 +750,9 @@ export class Brain {
       lessons: this.lessons,
       bestByCtx: this.bestByCtx,
       weapon: this.me.weapon,
+      ability: this.ability,
+      levels: this.levels,
+      buffs: this.buffs,
     };
   }
 
@@ -648,6 +784,11 @@ export class Brain {
     if (d.stats) this.stats = { ...freshStats(), ...d.stats, sessions: (d.stats.sessions ?? 0) + 1 };
     this.lessons = d.lessons ?? [];
     if (d.weapon && Array.isArray(d.weapon.strokes)) this.me.equip(d.weapon);
+    this.ability = d.ability === 'tk' ? 'tk' : 'base';
+    for (const s of STAT_NAMES) this.levels[s] = clamp(Math.round(d.levels?.[s] ?? 0), 0, MAX_LEVEL);
+    this.buffs = d.buffs ?? [];
+    this.applyLevels();
+    this.me.setSize(this.me.targetSize); // loading: no grow animation
     this.bestByCtx = d.bestByCtx ?? {};
   }
 
@@ -697,6 +838,7 @@ export class Brain {
     const ctrl = me.ctrl;
     for (const e of me.hurtLog) if (e.time > this.lastThink) this.totalHurt += e.amount;
     this.lastThink = world.time;
+    this.lastWorld = world;
     this.stats.playTime += dt;
     me.hurtLog = me.hurtLog.filter((e) => e.time > world.time - 3);
     this.resolve(world);
@@ -734,6 +876,7 @@ export class Brain {
         }
       }
     }
+    if (this.ability === 'tk') this.manageTelekinesis(world, threats, enemy);
     if (this.planning && this.stepPlanning()) this.finishPlanning(world);
     const pd = this.pending;
     if (pd && !pd.fired && world.time >= pd.fireAt && me.canAct()) {
@@ -772,16 +915,26 @@ export class Brain {
           airborne: enemy.mode === 'air' ? 1 : 0,
           attacking: ea === 'punch' || ea === 'kick' || ea === 'swing' ? 1 : 0,
           armed: me.weapon ? 1 : 0,
+          oPower: statFeature(me.attrs.power),
+          oSwing: me.weapon ? statFeature(me.attrs.swing) : 0,
+          oTk: me.tk ? 1 : 0,
         };
         const a = this.chooseStrike(world, o);
         const kick = a === 1;
-        const kind = (['punch', 'kick', 'swing'] as const)[a];
+        const kind = (['punch', 'kick', 'swing', 'swing', 'punch'] as const)[a];
         const tgt = kick
           ? { x: enemy.pelvis.x, y: (enemy.ps[NECK].y + enemy.ps[PELVIS].y) / 2 + 8 }
           : { x: enemy.ps[HEAD].x, y: enemy.ps[HEAD].y + 4 };
-        if (a >= 0 && me.start(kind, { target: tgt })) {
+        if (a === 4 && me.tk) {
+          // slam: fling the held drawing into him
+          me.tk.mode = 'slam';
+          me.tk.target = enemy.chest;
+          me.tk.until = me.time + 0.55;
+          this.attackCd = rand(0.6, 1.2) * p.tempo;
+          this.strikePending = { x: toVec(OFFENSE_KEYS, o), a, endAt: world.time + 0.8, dealt0: me.dealt, hurt0: this.totalHurt };
+        } else if (a >= 0 && a < 4 && me.start(kind, { target: tgt, dir: a === 3 ? 2 : 0 })) {
           this.attackCd = rand(0.5, 1.1) * p.tempo;
-          this.strikePending = { x: toVec(OFFENSE_KEYS, o), a, endAt: world.time + (kick || kind === 'swing' ? 0.6 : 0.5), dealt0: me.dealt, hurt0: this.totalHurt };
+          this.strikePending = { x: toVec(OFFENSE_KEYS, o), a, endAt: world.time + (a === 3 ? 1.0 : kick || kind === 'swing' ? 0.6 : 0.5), dealt0: me.dealt, hurt0: this.totalHurt };
         }
       }
     } else {

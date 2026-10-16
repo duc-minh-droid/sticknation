@@ -3,7 +3,7 @@ import '@fontsource/caveat/700.css';
 import { animate } from 'motion';
 import { DT, GROUND, H, W, setArenaHeight } from './physics';
 import { makeSolid, reshape, inside, bounds as solidBounds, sitsOnGround, SolidKind } from './terrain';
-import { Stickman } from './stickman';
+import { Stickman, BASE_STICK, isBaseStick } from './stickman';
 import { World, SPIKE_W, newId } from './world';
 import { render, theme, Overlay } from './render';
 import { bodyFromStroke } from './draw';
@@ -31,7 +31,11 @@ const ENEMY_KINDS = [
   { name: 'Red', color: '#d64545' },
   { name: 'Green', color: '#2f9e5a' },
   { name: 'Purple', color: '#8e4ec6' },
+  { name: 'Orange', color: '#e07b24' },
+  { name: 'Teal', color: '#1f9aa0' },
+  { name: 'Pink', color: '#d64f9a' },
 ];
+let enemyCount = 0;
 const enemies: Brain[] = [];
 const brains = (): Brain[] => [heroBrain, ...enemies];
 
@@ -42,7 +46,8 @@ const state = { paused: false, slow: false, manual: qs.has('manual') };
 ov.extra = (c) => {
   if (ov.debug && !state.manual) drawThreat(c, heroBrain);
   fx.draw(c, th);
-  drawThoughts(c, brains().filter((b) => !(state.manual && b === heroBrain)), th);
+  // only Blue thinks (enemies are fixed logic), so only he gets speech bubbles
+  if (!state.manual) drawThoughts(c, [heroBrain], th);
 };
 
 // ------------------------------------------------------------------ view transform
@@ -74,10 +79,43 @@ function resizeArena(h: number) {
 new ResizeObserver(resize).observe(canvas);
 resize();
 
+// ------------------------------------------------------------------ zoom & pan
+/** Camera: zoom 1 shows the whole arena; (x, y) is the arena point at the centre of the view. */
+const view = { z: 1, x: W / 2, y: H / 2 };
+const MAX_ZOOM = 4;
+
+function clampView() {
+  view.z = clamp(view.z, 1, MAX_ZOOM);
+  const hw = W / (2 * view.z), hh = H / (2 * view.z);
+  view.x = clamp(view.x, hw, W - hw);
+  view.y = clamp(view.y, hh, H - hh);
+}
+
+/** Zoom by a factor, keeping the arena point under the cursor (or the centre) fixed. */
+function zoomBy(factor: number, clientX?: number, clientY?: number) {
+  const r = canvas.getBoundingClientRect();
+  const cx = clientX ?? r.left + r.width / 2, cy = clientY ?? r.top + r.height / 2;
+  const before = toWorld(cx, cy);
+  view.z = clamp(view.z * factor, 1, MAX_ZOOM);
+  const sx = (cx - r.left - offX) / scale, sy = (cy - r.top - offY) / scale;
+  view.x = before.x - (sx - W / 2) / view.z;
+  view.y = before.y - (sy - H / 2) / view.z;
+  clampView();
+}
+
 function toWorld(clientX: number, clientY: number): Vec {
   const r = canvas.getBoundingClientRect();
-  return { x: (clientX - r.left - offX) / scale, y: (clientY - r.top - offY) / scale };
+  const sx = (clientX - r.left - offX) / scale, sy = (clientY - r.top - offY) / scale;
+  return { x: (sx - W / 2) / view.z + view.x, y: (sy - H / 2) / view.z + view.y };
 }
+
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  zoomBy(Math.exp(-e.deltaY * 0.0015), e.clientX, e.clientY);
+}, { passive: false });
+
+// right- or middle-drag pans the view
+let pan: { x: number; y: number } | null = null;
 const inArena = (p: Vec) => p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= GROUND + 10;
 
 // ------------------------------------------------------------------ placing items
@@ -100,10 +138,12 @@ function place(kind: ItemKind, p: Vec): boolean {
       world.clouds.push({ id: newId(), x, y: clamp(p.y, 50, GROUND - 260), cd: 0.8 });
       break;
     case 'enemy': {
-      const kindIdx = ENEMY_KINDS.findIndex((k) => !enemies.some((e) => e.me.name === k.name));
-      if (kindIdx < 0) { palette.wiggle('enemy'); return false; }
-      const k = ENEMY_KINDS[kindIdx];
-      const m = new Stickman(x, 1 + kindIdx, k.color, k.name);
+      // no limit: colours cycle, names get a number once the colours run out
+      const k = ENEMY_KINDS[enemyCount % ENEMY_KINDS.length];
+      const round = Math.floor(enemyCount / ENEMY_KINDS.length);
+      enemyCount++;
+      // all enemies are on one team: they gang up on Blue, not on each other
+      const m = new Stickman(x, 1, k.color, round ? `${k.name} ${round + 1}` : k.name);
       // appear right at the cursor (drops from there if it's in the air)
       m.teleport(x, Math.min(p.y, world.surfaceAt(x, p.y) - 56));
       m.facing = Math.sign(hero.pelvis.x - x) || -1;
@@ -213,6 +253,7 @@ canvas.addEventListener('dblclick', (e) => {
 });
 canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture(e.pointerId);
+  if (e.button === 1 || e.button === 2) { pan = { x: e.clientX, y: e.clientY }; canvas.classList.add('grabbing'); return; }
   const p = toWorld(e.clientX, e.clientY);
   held = itemAt(p);
   if (held) { canvas.classList.add('grabbing'); return; }
@@ -222,6 +263,13 @@ canvas.addEventListener('pointerdown', (e) => {
   strokeTimes = [performance.now()];
 });
 canvas.addEventListener('pointermove', (e) => {
+  if (pan) {
+    view.x -= (e.clientX - pan.x) / (scale * view.z);
+    view.y -= (e.clientY - pan.y) / (scale * view.z);
+    pan = { x: e.clientX, y: e.clientY };
+    clampView();
+    return;
+  }
   const p = toWorld(e.clientX, e.clientY);
   if (held) {
     moveHeld(held, p);
@@ -240,6 +288,7 @@ canvas.addEventListener('pointermove', (e) => {
 });
 canvas.addEventListener('pointerleave', () => { if (!held && !drawing) { ov.hover = null; canvas.classList.remove('grab'); } });
 canvas.addEventListener('pointerup', (e) => {
+  if (pan) { pan = null; canvas.classList.remove('grabbing'); return; }
   if (held) {
     const hot = palette.trash(!(held.kind === 'man' && world.men[held.id] === hero), e.clientX, e.clientY);
     if (hot) {
@@ -275,6 +324,10 @@ canvas.addEventListener('pointerup', (e) => {
 
 // ------------------------------------------------------------------ item grid under the arena
 
+document.getElementById('zoomIn')!.onclick = () => zoomBy(1.4);
+document.getElementById('zoomOut')!.onclick = () => zoomBy(1 / 1.4);
+document.getElementById('zoomFit')!.onclick = () => { view.z = 1; clampView(); };
+
 const palette = new Palette(document.getElementById('palette')!, {
   drop: (kind, cx, cy) => place(kind, toWorld(cx, cy)),
   preview: () => {},
@@ -290,17 +343,45 @@ const workshop = new Workshop(
   document.getElementById('padStats')!,
 );
 workshop.onGive = (w) => {
-  hero.equip(w);
+  baseWeapon = w;
+  if (heroBrain.ability === 'base') hero.equip(w);
   heroBrain.thought = { text: 'Ooh, a new toy!', at: hero.time, mood: 'good' };
   void saveBrain(heroBrain, true);
 };
 workshop.onDrop = () => {
-  hero.equip(null);
-  heroBrain.thought = { text: 'Hey! I was using that.', at: hero.time, mood: 'bad' };
+  baseWeapon = BASE_STICK;
+  if (heroBrain.ability === 'base') hero.equip(BASE_STICK);
+  heroBrain.thought = { text: 'Back to my trusty stick.', at: hero.time, mood: 'think' };
   void saveBrain(heroBrain, true);
 };
+// ------------------------------------------------------------------ abilities
+/** The weapon he uses under Base (stick, or one you drew), kept while he's on another ability. */
+let baseWeapon = BASE_STICK as typeof BASE_STICK;
+const abilityBtns = Array.from(document.querySelectorAll<HTMLButtonElement>('.abil'));
+function setAbility(a: 'base' | 'tk', announce = true) {
+  if (heroBrain.ability === 'base' && hero.weapon) baseWeapon = hero.weapon;
+  heroBrain.ability = a;
+  if (a === 'base') { heroBrain.releaseTelekinesis(world); hero.equip(baseWeapon); }
+  else hero.equip(null);
+  for (const b of abilityBtns) b.classList.toggle('on', b.dataset.ability === a);
+  document.getElementById('baseBox')!.hidden = a !== 'base';
+  document.getElementById('tkBox')!.hidden = a !== 'tk';
+  if (announce) {
+    heroBrain.thought = { text: a === 'tk' ? 'Telekinesis! Draw me something.' : 'Stick time.', at: hero.time, mood: 'think' };
+    void saveBrain(heroBrain, true);
+    const btn = abilityBtns.find((b) => b.dataset.ability === a);
+    if (btn) animate(btn, { scale: [0.92, 1.06, 1] }, { duration: 0.35 });
+  }
+}
+for (const b of abilityBtns) b.onclick = () => setAbility(b.dataset.ability as 'base' | 'tk');
+// Base ability: he always has at least his stick
+hero.equip(BASE_STICK);
+setAbility('base', false);
 void loadBrain(heroBrain).then(() => {
-  if (hero.weapon) workshop.show(hero.weapon);
+  if (!hero.weapon) hero.equip(BASE_STICK);
+  if (hero.weapon) baseWeapon = hero.weapon;
+  setAbility(heroBrain.ability, false);
+  if (hero.weapon && !isBaseStick(hero.weapon)) workshop.show(hero.weapon);
   lessonAt = heroBrain.lessons[0]?.at ?? -1; // only lessons learned from now on get a lightbulb
 });
 
@@ -319,6 +400,7 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyJ') hero.start('punch', { target: head });
   if (e.code === 'KeyK') hero.start('kick', { target: { x: hero.pelvis.x + 70 * f, y: hero.pelvis.y - 10 } });
   if (e.code === 'KeyF' && hero.weapon) hero.start('swing', { target: { x: hero.pelvis.x + 90 * f, y: hero.ps[1].y + 20 } });
+  if (e.code === 'KeyH' && hero.weapon) hero.start('swing', { target: { x: hero.pelvis.x + 90 * f, y: hero.ps[1].y + 20 }, dir: 2 });
   if (e.code === 'KeyL') hero.start('block');
   if (e.code === 'KeyS') hero.start('duck');
   if (e.code === 'Space') { e.preventDefault(); hero.start('dodge', { dir: -f }); }
@@ -378,7 +460,7 @@ function resetArena() {
   drawing = false;
 }
 button(label(ICONS.brain, 'Learning'), 'Let the AI keep learning', (b) => { heroBrain.learning = !heroBrain.learning; b.classList.toggle('on', heroBrain.learning); }, true);
-button(label(ICONS.joystick, 'Drive Blue'), 'Control Blue yourself: A/D move, W jump, S duck, J punch, K kick, F swing, L block, Space dodge', (b) => { state.manual = !state.manual; b.classList.toggle('on', state.manual); }, state.manual);
+button(label(ICONS.joystick, 'Drive Blue'), 'Control Blue yourself: A/D move, W jump, S duck, J punch, K kick, F swing, H heavy swing, L block, Space dodge', (b) => { state.manual = !state.manual; b.classList.toggle('on', state.manual); }, state.manual);
 
 // ------------------------------------------------------------------ panel + saving
 
@@ -388,6 +470,7 @@ setInterval(() => void saveBrain(heroBrain), 5000);
 saveOnExit(() => [heroBrain]);
 let hudT = 0;
 let lessonAt: number | null = null; // null until the saved brain has loaded
+let lastBuffAt = -1;
 
 // ------------------------------------------------------------------ loop
 
@@ -407,6 +490,11 @@ function tick(dt: number) {
     fx.dust(b.me.pelvis.x, b.me.pelvis.y, 16);
   }
   // a new lesson: lightbulb over his head
+  // stat level-up popup
+  if (heroBrain.lastBuff && heroBrain.lastBuff.at !== lastBuffAt) {
+    lastBuffAt = heroBrain.lastBuff.at;
+    fx.buff(hero.head.x, hero.head.y - 70, heroBrain.lastBuff.text);
+  }
   const newest = heroBrain.lessons[0]?.at ?? -1;
   if (lessonAt !== null && newest !== lessonAt && newest >= 0) fx.aha(hero.head.x + 18, hero.head.y - 40);
   if (lessonAt !== null) lessonAt = newest;
@@ -421,14 +509,29 @@ function frame(now: number) {
   if (!state.paused) tick(dt);
   fx.step(state.paused ? 0 : dt);
   hudT -= dt;
-  if (hudT <= 0) { hudT = 0.2; hud.update(heroBrain, enemies); }
+  if (hudT <= 0) {
+    hudT = 0.2;
+    hud.update(heroBrain, enemies);
+    if (heroBrain.ability === 'tk') {
+      const tk = hero.tk;
+      document.getElementById('tkStatus')!.textContent = tk
+        ? `Holding drawing #${tk.bodyId} · ${tk.mode === 'hover' ? 'ready' : tk.mode === 'shield' ? 'shielding!' : 'slamming!'}`
+        : 'Not holding anything: draw something near him.';
+    }
+  }
 
   const dpr = window.devicePixelRatio || 1;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = th.paper;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  const sh = fx.offset();
-  ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * (offX + sh.x * scale), dpr * (offY + sh.y * scale));
+  ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * offX, dpr * offY);
+  clampView(); // the arena height can change with the window
+  if (view.z > 1) {
+    ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
+    ctx.translate(W / 2, H / 2);
+    ctx.scale(view.z, view.z);
+    ctx.translate(-view.x, -view.y);
+  }
   render(ctx, world, ov, th, now / 1000);
   requestAnimationFrame(frame);
 }

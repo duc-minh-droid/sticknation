@@ -12,9 +12,9 @@ import { Circuit, Wire, Terms } from './vendor/handwired/numeric-ui-core';
 // Offense head: fight features  -> value of each strike (punch/kick).
 // ---------------------------------------------------------------------------
 
-export const REACTIONS = ['duck', 'jump', 'dodge', 'block', 'ignore', 'swat'] as const;
+export const REACTIONS = ['duck', 'jump', 'dodge', 'block', 'ignore', 'swat', 'shield'] as const;
 export type Reaction = (typeof REACTIONS)[number];
-export const STRIKES = ['punch', 'kick', 'swing'] as const;
+export const STRIKES = ['punch', 'kick', 'swing', 'heavy', 'slam'] as const;
 export type Strike = (typeof STRIKES)[number];
 
 /**
@@ -22,15 +22,34 @@ export type Strike = (typeof STRIKES)[number];
  * harm = expected damage if it connects (from mass and closing speed), ttc = seconds
  * until contact, cornered = 1 when a wall or spikes block the escape route.
  */
-export interface DefenseInput { height: number; speed: number; size: number; punch: number; kick: number; above: number; flying: number; harm: number; ttc: number; cornered: number; armed: number }
+export interface DefenseInput {
+  height: number; speed: number; size: number; punch: number; kick: number; above: number; flying: number; harm: number; ttc: number; cornered: number; armed: number;
+  /** his own stats, 0 = baseline .. 1 = maxed (see ai.ts) */
+  sReflex: number; sAgility: number; sTough: number; sSwing: number;
+  /** holding a drawing by telekinesis */
+  tk: number;
+}
 /** Fight inputs at the moment a strike is chosen. */
-export interface OffenseInput { dist: number; headH: number; ducking: number; blocking: number; airborne: number; attacking: number; armed: number }
+export interface OffenseInput { dist: number; headH: number; ducking: number; blocking: number; airborne: number; attacking: number; armed: number; oPower: number; oSwing: number; oTk: number }
 
-export const DEFENSE_KEYS: (keyof DefenseInput)[] = ['height', 'speed', 'size', 'punch', 'kick', 'above', 'flying', 'harm', 'ttc', 'cornered', 'armed'];
+export const DEFENSE_KEYS: (keyof DefenseInput)[] = ['height', 'speed', 'size', 'punch', 'kick', 'above', 'flying', 'harm', 'ttc', 'cornered', 'armed', 'sReflex', 'sAgility', 'sTough', 'sSwing', 'tk'];
 /** Values for inputs that older saved samples don't have. */
-export const DEFENSE_DEFAULTS: Partial<DefenseInput> = { harm: 20, ttc: 0.5, cornered: 0, armed: 0 };
-export const OFFENSE_KEYS: (keyof OffenseInput)[] = ['dist', 'headH', 'ducking', 'blocking', 'airborne', 'attacking', 'armed'];
-export const OFFENSE_DEFAULTS: Partial<OffenseInput> = { armed: 0 };
+export const DEFENSE_DEFAULTS: Partial<DefenseInput> = { harm: 20, ttc: 0.5, cornered: 0, armed: 0, sReflex: 0, sAgility: 0, sTough: 0, sSwing: 0, tk: 0 };
+export const OFFENSE_KEYS: (keyof OffenseInput)[] = ['dist', 'headH', 'ducking', 'blocking', 'airborne', 'attacking', 'armed', 'oPower', 'oSwing', 'oTk'];
+export const OFFENSE_DEFAULTS: Partial<OffenseInput> = { armed: 0, oPower: 0, oSwing: 0, oTk: 0 };
+
+/**
+ * Knowing his own stats, [duck, jump, dodge, block, ignore, swat]:
+ *  quick reflexes make every reaction more reliable; agility makes jumps and dodges go further;
+ *  toughness makes taking a hit (block, or even ignoring small stuff) more acceptable;
+ *  fast swings make whacking things away worth it.
+ */
+const STAT_RULES: Record<'sReflex' | 'sAgility' | 'sTough' | 'sSwing', number[]> = {
+  sReflex: [0.15, 0.05, 0.1, 0.15, 0, 0.1],
+  sAgility: [0, 0.2, 0.3, 0, 0, 0],
+  sTough: [0, 0, 0, 0.25, 0.2, 0.1],
+  sSwing: [0, 0, 0, 0, 0, 0.4],
+};
 
 interface Cell { name: string; lo: number; hi: number; init: number; trainable: boolean }
 
@@ -63,17 +82,27 @@ const SENSE: Record<'harmless' | 'heavy' | 'urgent' | 'cornered', number[]> = {
 
 /** Strike preferences [punch, kick, swing] per fight feature. */
 const STRIKE_RULES: Record<string, number[]> = {
-  bias: [0.5, 0.45, -1.0],
-  armed: [0, 0, 1.6],          // can only swing when holding something
-  ducking: [-0.6, 0.2, 0.1],   // a punch at head height whiffs over a ducking enemy
-  blocking: [-0.3, -0.1, 0.2], // a block soaks punches; a weapon reaches over it
-  airborne: [-0.3, -0.3, 0],
-  attacking: [0.1, -0.1, 0],   // trade fast punches into a windup
-  far: [-0.2, 0.15, 0.4],      // kicks and weapons reach further
+  bias: [0.5, 0.45, -1.0, -1.3],
+  armed: [0, 0, 1.6, 1.5],              // can only swing when holding something
+  ducking: [-0.6, 0.2, 0.1, 0.2],       // a punch at head height whiffs over a ducking enemy
+  blocking: [-0.3, -0.1, 0.2, 1.0],     // heavy swings break blocks: the answer to a turtle
+  airborne: [-0.3, -0.3, 0, -0.4],
+  attacking: [0.1, -0.1, 0, -0.6],      // a slow windup gets punished by a fast attacker
+  far: [-0.2, 0.15, 0.4, 0.2],          // kicks and weapons reach further
+  oPower: [0.2, 0.25, 0.2, 0.35],       // stronger: big hits pay off more
+  oSwing: [0, 0, 0.5, 0.3],             // faster swings: the windup hurts less
+  // telekinesis: slam the held drawing into him, from range
+  tk: [0, 0, 0, 0, 2.2],
 };
+STRIKE_RULES.bias[4] = -1.5;
+STRIKE_RULES.far[4] = 0.6;
+STRIKE_RULES.blocking[4] = 0.3;
+STRIKE_RULES.oPower[4] = 0.2;
 
 /** Holding a weapon: swatting things away becomes an option (it starts unpreferred). */
-const ARMED = { bias: [0, 0, 0, 0, 0, -1.0], armed: [0, 0, 0, 0, 0, 1.3] };
+const ARMED = { bias: [0, 0, 0, 0, 0, -1.0, -1.0], armed: [0, 0, 0, 0, 0, 1.3, 0] };
+/** Holding a drawing by telekinesis: parking it in the way (shield) becomes the go-to. */
+const TK_RULE = [0, 0, -0.1, -0.1, 0, 0, 1.6];
 /**
  * Common sense with a weapon, [duck, jump, dodge, block, ignore, swat]:
  *  vs strikes: parry them (swat at the fist/foot) or guard behind the weapon.
@@ -82,6 +111,8 @@ const ARMED = { bias: [0, 0, 0, 0, 0, -1.0], armed: [0, 0, 0, 0, 0, 1.3] };
 const ARMED_VS = { enemy: [0, -0.1, 0, 0.35, 0, 0.7], projectile: [0, 0, 0, 0.1, 0, 0.3] };
 
 export interface Sample { x: number[]; a: number; r: number }
+
+const L2_TO_RULES = 0.003;
 
 export class PolicyNet {
   circuit: Circuit;
@@ -110,6 +141,11 @@ export class PolicyNet {
     add('in.ttc', 0, 2, 0, false);
     add('in.cornered', 0, 1, 0, false);
     add('in.armed', 0, 1, 0, false);
+    for (const k of Object.keys(STAT_RULES)) add(`in.${k}`, 0, 1, 0, false);
+    add('in.oPower', 0, 1, 0, false);
+    add('in.oSwing', 0, 1, 0, false);
+    add('in.tk', 0, 1, 0, false);
+    add('in.oTk', 0, 1, 0, false);
     add('in.dist', 0, 1600, 0, false);
     add('in.headH', 0, 300, 0, false);
     for (const k of ['ducking', 'blocking', 'airborne', 'attacking']) add(`in.${k}`, 0, 1, 0, false);
@@ -131,9 +167,11 @@ export class PolicyNet {
     // fast threats: you can't outrun them with a backstep, go over or under instead
     const FAST = [0.05, 0.15, -0.4, 0, 0];
     REACTIONS.forEach((r, i) => add(`wf.${r}`, -5, 5, FAST[i] ?? 0, true));
-    REACTIONS.forEach((r, i) => { add(`b.${r}`, -5, 5, ARMED.bias[i], true); add(`wa.${r}`, -5, 5, ARMED.armed[i], true); });
-    REACTIONS.forEach((r, i) => { add(`wae.${r}`, -5, 5, ARMED_VS.enemy[i], true); add(`wap.${r}`, -5, 5, ARMED_VS.projectile[i], true); });
-    Object.keys(STRIKE_RULES).forEach((k) => STRIKES.forEach((s, i) => add(`s.${k}.${s}`, -5, 5, STRIKE_RULES[k][i], true)));
+    REACTIONS.forEach((r, i) => { add(`b.${r}`, -5, 5, ARMED.bias[i] ?? 0, true); add(`wa.${r}`, -5, 5, ARMED.armed[i] ?? 0, true); });
+    REACTIONS.forEach((r, i) => { add(`wae.${r}`, -5, 5, ARMED_VS.enemy[i] ?? 0, true); add(`wap.${r}`, -5, 5, ARMED_VS.projectile[i] ?? 0, true); });
+    REACTIONS.forEach((r, i) => add(`wt.${r}`, -5, 5, TK_RULE[i] ?? 0, true));
+    (Object.keys(STAT_RULES) as (keyof typeof STAT_RULES)[]).forEach((k) => REACTIONS.forEach((r, i) => add(`st.${k}.${r}`, -5, 5, STAT_RULES[k][i] ?? 0, true)));
+    Object.keys(STRIKE_RULES).forEach((k) => STRIKES.forEach((s, i) => add(`s.${k}.${s}`, -5, 5, STRIKE_RULES[k][i] ?? 0, true)));
 
     const c = new Circuit(this.cells.length);
     this.circuit = c;
@@ -188,8 +226,10 @@ export class PolicyNet {
       for (const k of Object.keys(SENSE) as (keyof typeof SENSE)[]) terms.push([c.multiply(S(`c.${k}.${r}`), sense[k]), 1]);
       terms.push([S(`b.${r}`), 1]);
       terms.push([c.multiply(S(`wa.${r}`), S('in.armed')), 1]);
+      terms.push([c.multiply(S(`wt.${r}`), S('in.tk')), 1]);
       terms.push([c.multiply(S(`wae.${r}`), armedVsEnemy), 1]);
       terms.push([c.multiply(S(`wap.${r}`), armedVsThing), 1]);
+      for (const k of Object.keys(STAT_RULES)) terms.push([c.multiply(S(`st.${k}.${r}`), S(`in.${k}`)), 1]);
       this.defenseOut.push(c.affine(terms));
     });
 
@@ -203,6 +243,9 @@ export class PolicyNet {
       attacking: S('in.attacking'),
       armed: S('in.o.armed'),
       far,
+      oPower: S('in.oPower'),
+      oSwing: S('in.oSwing'),
+      tk: S('in.oTk'),
     };
     STRIKES.forEach((s) => {
       const terms: [Wire, number][] = [];
@@ -243,7 +286,7 @@ export class PolicyNet {
    * One Adam step on a minibatch. Loss per sample = 0.5 (Q(x, a) - r)^2, i.e. learn
    * how good each choice turned out in situations like this one.
    */
-  train(defense: Sample[], offense: Sample[], lr = 0.05) {
+  train(defense: Sample[], offense: Sample[], lr = 0.015) {
     const n = defense.length + offense.length;
     if (n === 0) return;
     const grad = new Float64Array(this.cells.length);
@@ -269,7 +312,9 @@ export class PolicyNet {
       const k = this.cells[i];
       // thresholds live on a much bigger scale than preference weights
       const scale = k.name.startsWith('t.') ? (k.hi - k.lo) * 0.05 : 1;
-      const g = grad[i] / n;
+      // a gentle pull back toward the hand-written rule keeps one odd outcome from
+      // rewriting general knowledge (L2 toward the starting values)
+      const g = grad[i] / n + L2_TO_RULES * (this.source[i] - k.init) / (scale * scale);
       this.m[i] = b1 * this.m[i] + (1 - b1) * g;
       this.v[i] = b2 * this.v[i] + (1 - b2) * g * g;
       const mh = this.m[i] / (1 - b1 ** this.steps), vh = this.v[i] / (1 - b2 ** this.steps);
